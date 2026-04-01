@@ -36,10 +36,10 @@ namespace imu
         gyroZ = vx_imu_data.gyroZ;
         aX = accelX * accel_scaler;
         aY = accelY * accel_scaler;
-        aZ = accelZ * accel_scaler;
+        aZ = -accelZ * accel_scaler;
         stamp = vx_imu_data.timestamp;
-        omegaX = gyroX * gyro_scaler;
-        omegaY = gyroY * gyro_scaler;
+        omegaX = -gyroX * gyro_scaler;
+        omegaY = -gyroY * gyro_scaler;
         omegaZ = gyroZ * gyro_scaler;
         stamp_seconds = stamp * PERIOD_75_MHZ; // conversion to absolute seconds
 

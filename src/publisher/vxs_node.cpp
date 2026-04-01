@@ -35,7 +35,6 @@ namespace vxs_ros1
         nhp.param<bool>("publish_pointcloud", publish_pointcloud_, false);
         nhp.param<bool>("publish_events", publish_events_, false);
         nhp.param<bool>("publish_imu", publish_imu_, false);
-
         nhp.param<int>("fps", fps_, 20);
         period_ = std::lround(1000.0f / fps_); // period in ms (will be used in initialization if streaming events)
 
@@ -46,7 +45,7 @@ namespace vxs_ros1
         {
             // Disable both standard pointcloud and depth image publishing
             publish_depth_image_ = publish_pointcloud_ = false;
-            ROS_INFO_STREAM("Streaming mode (event based) enabled. Disabling depth and standard pointcloud poublishers.\n");
+            ROS_INFO_STREAM("Streaming mode (event based) enabled. Disabling depth and standard pointcloud publishers.\n");
         }
         else
         {
@@ -143,17 +142,25 @@ namespace vxs_ros1
 
     bool VxsSensorPublisher::InitSensor()
     {
+        // Detect sensor
+        vxsdk::vxCameraType cam_type = vxsdk::vxDetectCameras();
+        CV_Assert(cam_type != vxsdk::vxCameraType::none && "Failed detecting a camera type.");
+
         // Set the frame rate (or time window)
-        vxsdk::pipelineType pipeline_type;
+        vxsdk::vxFlag init_flags;
         if (publish_events_)
         {
-            pipeline_type = vxsdk::pipelineType::all; // Get everything out XYT-XYT pairs and XYZT
+            init_flags = vxsdk::vxFlag::XYZT;
             vxsdk::vxSetStreamingDuration(period_);
         }
         else
         {
-            pipeline_type = vxsdk::pipelineType::fbPointcloud;
+            init_flags = vxsdk::vxFlag::FBPOINTCLOUD;
             vxsdk::vxSetFPS(fps_);
+        }
+        if (publish_imu_)
+        {
+            init_flags = init_flags | vxsdk::vxFlag::IMU;
         }
         // Set filtering parameters
         vxsdk::vxSetBinningAmount(filtering_params_.binning_amount);
@@ -170,7 +177,8 @@ namespace vxs_ros1
         int cam_num = vxsdk::vxStartSystem( //
             config_json_.c_str(),           //
             calib_json_.c_str(),            //
-            pipeline_type);
+            init_flags,
+            cam_type);
 
         return cam_num > 0;
     }
@@ -190,7 +198,10 @@ namespace vxs_ros1
             {
                 int N;
                 vxsdk::vxXYZT *eventsXYZT = vxsdk::vxGetXYZT(N);
-                PublishStampedPointcloud(N, eventsXYZT);
+                if (N > 0)
+                {
+                    PublishStampedPointcloud(N, eventsXYZT);
+                }
             }
             else // Frame based data
             {
