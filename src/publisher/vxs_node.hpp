@@ -81,6 +81,10 @@ namespace vxs_ros1
         static const int SENSOR_WIDTH = 300;
         static const int SENSOR_HEIGHT = 300;
 
+        //! Default RGB dimensions
+        static const int DEFAULT_RGB_WIDTH = 640;
+        static const int DEFAULT_RGB_HEIGHT = 480;
+
         VxsSensorPublisher(const ros::NodeHandle &nh, const ros::NodeHandle &nhp);
         ~VxsSensorPublisher();
 
@@ -110,9 +114,30 @@ namespace vxs_ros1
         std::string config_json_;
         //! calibration json
         std::string calib_json_;
+        //! RGB calibration (yaml)
+        std::string rgb_calib_filename_;
+        //! RGB pose wrt sensor calibration file (text)
+        std::string rgb_pose_calib_filename_;
+        //! RGB Intrinsics
+        cv::Matx<float, 3, 3> rgbK_;
+        //! RGB distortion
+        cv::Vec<float, 5> rgbD_;
+        //! RGB orientation with respect to sensr
+        cv::Matx<float, 3, 3> rgbR_cs_;
+        //! RGB translation with respect to sensor
+        cv::Vec3f rgbt_cs_;
+        //! RGB/Grayscale image size
+        cv::Size_<int> rgb_image_size_;
+        //! OpenCV capture object
+        cv::VideoCapture cam_cap_;
+        //! RGB camera index
+        int rgb_cam_index_;
 
         //! Publish depth image
         bool publish_depth_image_;
+
+        //! Publish images (actual grayscale images)
+        bool publish_rgb_;
 
         //! Publish pointcloud
         bool publish_pointcloud_;
@@ -127,7 +152,7 @@ namespace vxs_ros1
         bool flag_shutdown_request_;
         //! Flag indicating execution is inside the polling loop.
         bool flag_in_polling_loop_;
-        //! A flag forcing update of the observation window wit the cached values
+        //! A flag forcing update of the observation window with the cached values
         std::atomic<bool> flag_update_observation_window_;
         //! observation window parameters
         int on_time_, period_time_;

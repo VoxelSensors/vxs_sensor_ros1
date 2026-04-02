@@ -1,5 +1,8 @@
 #include <chrono>
 #include <functional>
+#include <fstream>
+#include <iostream>
+#include <ostream>
 
 #include "publisher/vxs_node.hpp"
 #include "common.hpp"
@@ -7,6 +10,115 @@
 
 #include <cv_bridge/cv_bridge.h>
 #include <sensor_msgs/image_encodings.h>
+
+namespace
+{
+    //! Load RGB calibration from **yaml**
+    bool LoadRGBCalibration(               //
+        const std::string &rgb_calib_yaml, //
+        const cv::Size_<int> &image_size,  //
+        cv::Matx<float, 3, 3> &K,          //
+        cv::Vec<float, 5> &D)
+    {
+        cv::FileStorage fs(rgb_calib_yaml, cv::FileStorage::READ);
+
+        if (!fs.isOpened())
+        {
+            return false;
+        }
+
+        int rgb_calib_width, rgb_calib_height;
+        fs["width"] >> rgb_calib_width;
+        fs["height"] >> rgb_calib_height;
+
+        float scaler_x = 1;
+        float scaler_y = 1;
+        if (image_size.width != rgb_calib_width || image_size.height != rgb_calib_height)
+        {
+            scaler_x = (1.0 * image_size.width) / rgb_calib_width;
+            scaler_y = (1.0 * image_size.height / rgb_calib_height);
+        }
+
+        cv::Matx<float, 1, 5> mxD;
+        fs["D"] >> mxD;
+        for (int i = 0; i < 5; i++)
+        {
+            D[i] = mxD(0, i);
+        }
+
+        fs["K"] >> K;
+        K(0, 0) *= scaler_x;
+        K(0, 2) *= scaler_x;
+        K(1, 1) *= scaler_y;
+        K(1, 2) *= scaler_y;
+
+        // fs["P"] >> P;
+        /// P(0, 0) *= scaler_x;
+        // P(0, 2) *= scaler_x;
+        // P(1, 1) *= scaler_y;
+        /// P(1, 2) *= scaler_y;
+
+        // fs["R"] >> rgbR;
+
+        fs.release();
+        return true;
+    }
+
+    std::vector<std::string> SplitLine(const std::string &line)
+    {
+        // remove spaces from line
+        std::string new_line;
+        for (int i = 0; i < line.length(); i++)
+        {
+            if (line[i] != ' ')
+            {
+                new_line += line[i];
+            }
+        }
+        std::istringstream iss(new_line);
+        std::string substring;
+        std::vector<std::string> tokens;
+        while (std::getline(iss, substring, ','))
+        {
+            tokens.push_back(substring);
+        }
+        return tokens;
+    }
+
+    bool LoadRGBRelativePose(const std::string &pose_calib_filename, cv::Matx<float, 3, 3> &R_cs, cv::Vec3f &t_cs)
+    {
+        std::ifstream input(pose_calib_filename);
+        if (!input.is_open())
+        {
+            return false;
+        }
+        std::string line;
+        /////////// A. read 1st line with comma delimeted axis-angle params
+        //
+        std::getline(input, line);
+        // Extract line #1 tokens
+        std::vector<std::string> line1_strings = SplitLine(line);
+        cv::Vec3f u = {static_cast<float>(atof(line1_strings[0].c_str())), static_cast<float>(atof(line1_strings[1].c_str())), static_cast<float>(atof(line1_strings[2].c_str()))};
+        cv::Rodrigues(u, R_cs);
+        //
+        /////////// B. Read second line with translation (in mms)
+        //
+        //
+        std::getline(input, line);
+        // Extract line #2 tokens
+        std::vector<std::string> line2_strings = SplitLine(line);
+        t_cs = {static_cast<float>(atof(line2_strings[0].c_str())), static_cast<float>(atof(line2_strings[1].c_str())), static_cast<float>(atof(line2_strings[2].c_str()))};
+        // t_cs *= 0.001;
+        //
+        //
+
+        // Here, we could read the rest of the lines with RGB calibration but not needed.
+        // std::getline(input, line);
+        input.close();
+
+        return true;
+    }
+}
 
 namespace vxs_ros1
 {
@@ -83,13 +195,29 @@ namespace vxs_ros1
 
         nhp.param<int>("median_rejection_threshold", filtering_params_.median_rejection_threshold, FilteringParams::DEFAULT_MEDIAN_REJECTION_THRESH);
 
+        nhp.param<bool>("publish_rgb", publish_rgb_, false);
+        nhp.param<int>("rgb_width", rgb_image_size_.width, DEFAULT_RGB_WIDTH);
+        nhp.param<int>("rgb_height", rgb_image_size_.height, DEFAULT_RGB_HEIGHT);
+        nhp.param<int>("rgb_cam_index", rgb_cam_index_, -1);
+
+        nhp.param<std::string>("rgb_calib", rgb_calib_filename_, "");
+        nhp.param<std::string>("rgb_pose_calib", rgb_pose_calib_filename_, "");
+
         // Print param values
         ROS_INFO_STREAM("Publish frame-based depth image (publlish_depth_image): " << (publish_depth_image_ ? "YES." : "NO."));
         ROS_INFO_STREAM("Publish frame-based pointcloud (publish_pcloud): " << (publish_pointcloud_ ? "YES." : "NO."));
         ROS_INFO_STREAM("Publish streaming based (stamped) point cloud (publish_events): " << (publish_events_ ? "YES." : "NO."));
+        ROS_INFO_STREAM("Publish grayscale images: " << (publish_rgb_ ? "YES." : "NO."));
+        if (publish_rgb_)
+        {
+            ROS_INFO_STREAM("----RGB camera index: " << rgb_cam_index_);
+            ROS_INFO_STREAM("----RGB calibration yaml: " << rgb_calib_filename_);
+            ROS_INFO_STREAM("----RGB Relative pose calibration yaml: " << rgb_pose_calib_filename_);
+            ROS_INFO_STREAM("----RGB image size: (" << rgb_image_size_.width << ", " << rgb_image_size_.height << ")");
+        }
         ROS_INFO_STREAM("FPS: " << fps_ << " and period in ms: " << period_);
         ROS_INFO_STREAM("Config JSON: " << config_json_);
-        ROS_INFO_STREAM("Calibration JSON: " << calib_json_);
+        ROS_INFO_STREAM("Sensor calibration JSON: " << calib_json_);
 
         // Load calibration into members
         LoadCalibrationFromJson(calib_json_);
@@ -172,6 +300,25 @@ namespace vxs_ros1
             filtering_params_.filterP1Y,                  //
             filtering_params_.temporal_threshold,         //
             filtering_params_.spatial_threshold);
+
+        // Check if we need to start the webcamera
+        if (publish_rgb_)
+        {
+            // Load RGB calibration
+            LoadRGBCalibration(rgb_calib_filename_, rgb_image_size_, rgbK_, rgbD_);
+            // Load sensor to camera relative pose
+            LoadRGBRelativePose(rgb_pose_calib_filename_, rgbR_cs_, rgbt_cs_);
+            // Start the capture
+            cam_cap_.open(rgb_cam_index_, cv::CAP_ANY);
+            if (!cam_cap_.isOpened())
+            {
+                std::cerr << "DataPlayer: Unable to open camera with " << rgb_cam_index_ << ". Exiting ..." << std::endl;
+                vxsdk::vxStopSystem();
+                exit(0);
+            }
+            cam_cap_.set(cv::CAP_PROP_FRAME_WIDTH, rgb_image_size_.width);
+            cam_cap_.set(cv::CAP_PROP_FRAME_HEIGHT, rgb_image_size_.height);
+        }
 
         // Start the SDK Engine.
         int cam_num = vxsdk::vxStartSystem( //
