@@ -1,6 +1,7 @@
 #include <chrono>
-#include <functional>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <iostream>
 #include <ostream>
 
@@ -312,7 +313,7 @@ namespace vxs_ros1
             cam_cap_.open(rgb_cam_index_, cv::CAP_ANY);
             if (!cam_cap_.isOpened())
             {
-                std::cerr << "DataPlayer: Unable to open camera with " << rgb_cam_index_ << ". Exiting ..." << std::endl;
+                std::cerr << "Unable to open camera with " << rgb_cam_index_ << ". Exiting ..." << std::endl;
                 vxsdk::vxStopSystem();
                 exit(0);
             }
@@ -330,21 +331,57 @@ namespace vxs_ros1
         return cam_num > 0;
     }
 
+    void *VxsSensorPublisher::GetNextSensorFrame(int &N)
+    {
+        void *frame_ptr = nullptr;
+        while (!vxsdk::vxCheckForData())
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time_ms_));
+        }
+        if (publish_events_) // streaming based publishing
+        {
+            vxsdk::vxXYZT *eventsXYZT = vxsdk::vxGetXYZT(N);
+            frame_ptr = (void *)eventsXYZT;
+        }
+        else // Frame based data
+        {
+            // Get data from the sensor
+            float *frameXYZ = vxsdk::vxGetFrameXYZ();
+            frame_ptr = (void *)frameXYZ;
+        }
+        return frame_ptr;
+    }
+
+    cv::Mat VxsSensorPublisher::GetNextRGBFrame()
+    {
+        cv::Mat frame;
+
+        cam_cap_.read(frame);
+
+        // Create the camera frame and add to queue
+        cv::Mat img = frame.clone();
+        return img;
+    }
+
     void VxsSensorPublisher::FramePollingLoop()
     {
         flag_in_polling_loop_ = true;
         int counter = 0;
         while (!flag_shutdown_request_)
         {
-            // Wait until data ready
-            while (!vxsdk::vxCheckForData())
+            // Wait until data ready. If publishing rgb, then release the rgb capturing loop
+            int N;
+            std::future<void *> sensor_future = std::async(std::launch::async, &VxsSensorPublisher::GetNextSensorFrame, this, std::ref(N));
+            cv::Mat rgb_frame;
+            if (publish_rgb_)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time_ms_));
+                // Capture a camera frame in the meanwhile...
+                rgb_frame = GetNextRGBFrame();
             }
+            void *frame_ptr = sensor_future.get();
             if (publish_events_) // streaming based publishing
             {
-                int N;
-                vxsdk::vxXYZT *eventsXYZT = vxsdk::vxGetXYZT(N);
+                vxsdk::vxXYZT *eventsXYZT = (vxsdk::vxXYZT *)frame_ptr;
                 if (N > 0)
                 {
                     PublishStampedPointcloud(N, eventsXYZT);
@@ -353,7 +390,7 @@ namespace vxs_ros1
             else // Frame based data
             {
                 // Get data from the sensor
-                float *frameXYZ = vxsdk::vxGetFrameXYZ();
+                float *frameXYZ = (float *)frame_ptr;
                 counter++;
                 // Extract frame
                 std::vector<cv::Vec3f> points;

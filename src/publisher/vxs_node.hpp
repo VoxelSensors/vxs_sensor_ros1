@@ -159,6 +159,9 @@ namespace vxs_ros1
         //! Mainloop sleep time
         int sleep_time_ms_;
 
+        //! frame counter
+        int frame_counter_;
+
         //! Reference ros Time for both frames and imu samples.
         ros::Time ref_time_;
         //! Reference time in the sensor
@@ -179,6 +182,11 @@ namespace vxs_ros1
 
         //! Initializae sensor
         bool InitSensor();
+        //! Return pointer to next sensor frame
+        void *GetNextSensorFrame(int &N);
+        //! Return next captured RGB frame
+        cv::Mat GetNextRGBFrame();
+
         //! The main loop of the frame polling thread
         void FramePollingLoop();
         //! Unpack sensor data into a cv::Mat and return 3D points
