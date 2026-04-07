@@ -42,6 +42,18 @@ namespace imu
 }
 namespace vxs_ros1
 {
+    enum class TSensorFrame
+    {
+        EventsXYZT = 0,
+        FrameXYZ
+    };
+    struct RawSensorFrame
+    {
+        int N;
+        TSensorFrame frame_type;
+        std::shared_ptr<std::vector<uint8_t>> data;
+    };
+
     struct CameraCalibration;
 
     //! Filtering parameters
@@ -159,6 +171,13 @@ namespace vxs_ros1
         //! Mainloop sleep time
         int sleep_time_ms_;
 
+        //! Publishing thread
+        std::thread publishing_thread_;
+        std::queue<RawSensorFrame> frame_queue_;
+        std::mutex queue_mutex_;
+        std::condition_variable queue_cv_;
+        std::atomic<bool> exit_publishing_{false};
+
         //! frame counter
         int frame_counter_;
 
@@ -189,6 +208,9 @@ namespace vxs_ros1
 
         //! The main loop of the frame polling thread
         void FramePollingLoop();
+        //! Publishing loop (for depth + pointclouds)
+        void PublishingLoop();
+
         //! Unpack sensor data into a cv::Mat and return 3D points
         cv::Mat UnpackFrameSensorData(float *frameXYZ, std::vector<cv::Vec3f> &points);
 
