@@ -47,11 +47,24 @@ namespace vxs_ros1
         EventsXYZT = 0,
         FrameXYZ
     };
+
+    struct RGBFrame
+    {
+        cv::Mat img;
+        ros::Time stamp;
+    };
     struct RawSensorFrame
     {
+        //! number of bytes in the raw frame
         int N;
+        //! Number of strruct/float entries
+        int num_entries;
+        //! Sensor frame type (events XYZT/frame XYZ)
         TSensorFrame frame_type;
+        //! The frame data as a strteam of bytes
         std::shared_ptr<std::vector<uint8_t>> data;
+        //! The global (ROS) stamp
+        ros::Time stamp;
     };
 
     struct CameraCalibration;
@@ -96,6 +109,9 @@ namespace vxs_ros1
         //! Default RGB dimensions
         static const int DEFAULT_RGB_WIDTH = 640;
         static const int DEFAULT_RGB_HEIGHT = 480;
+
+        //! Maximum depth of pubishing queue
+        static const int MAX_QUEUE_DEPTH = 100;
 
         VxsSensorPublisher(const ros::NodeHandle &nh, const ros::NodeHandle &nhp);
         ~VxsSensorPublisher();
@@ -171,12 +187,9 @@ namespace vxs_ros1
         //! Mainloop sleep time
         int sleep_time_ms_;
 
-        //! Publishing thread
-        std::thread publishing_thread_;
         std::queue<RawSensorFrame> frame_queue_;
         std::mutex queue_mutex_;
         std::condition_variable queue_cv_;
-        std::atomic<bool> exit_publishing_{false};
 
         //! frame counter
         int frame_counter_;
@@ -217,13 +230,13 @@ namespace vxs_ros1
         //! Load calilbration from json (required for the formation of the depth map)
         void LoadCalibrationFromJson(const std::string &calib_json);
         //! Publish image and calibration
-        void PublishDepthImage(const cv::Mat &depth_image);
+        void PublishDepthImage(const cv::Mat &depth_image, const ros::Time &depth_stamp);
         //! Publish a pointcloud
-        void PublishPointcloud(const std::vector<cv::Vec3f> &points);
+        void PublishPointcloud(const std::vector<cv::Vec3f> &points, const ros::Time &stamp);
         //! Pubish stamped pointcloud
-        void PublishStampedPointcloud(const int N, vxsdk::vxXYZT *eventsXYZT);
+        void PublishStampedPointcloud(const int N, vxsdk::vxXYZT *eventsXYZT, const ros::Time &stamp);
         //! Publish imu sample
-        void PublishIMUSample(const imu::IMUSample &sample);
+        void PublishIMUSample(const imu::IMUSample &sample, const ros::Time &depth_stamp);
         //! Update observation window callback
         bool UpdateObservationWindowCB(
             vxs_sensor_ros1::UpdateObservationWindow::Request &request,

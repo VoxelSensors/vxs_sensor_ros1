@@ -69,7 +69,7 @@ namespace
     {
         // remove spaces from line
         std::string new_line;
-        for (int i = 0; i < line.length(); i++)
+        for (size_t i = 0; i < line.length(); i++)
         {
             if (line[i] != ' ')
             {
@@ -250,12 +250,13 @@ namespace vxs_ros1
         imu_publisher_ = publish_imu_ ? std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::Imu>("imu", 10)) : nullptr;
 
         //! Start the pointcloud publishing thread
-        publishing_thread_ = std::thread(&VxsSensorPublisher::PublishingLoop, this);
-
+        ROS_INFO_STREAM("Starting frame publishing thread...");
+        frame_publishing_thread_ = std::make_shared<std::thread>(std::bind(&VxsSensorPublisher::PublishingLoop, this));
+        ROS_INFO_STREAM("Done.");
         // Initialize & start polling thread
-        ROS_INFO_STREAM("Starting publisher thread...");
+        ROS_INFO_STREAM("Starting polling thread...");
         frame_polling_thread_ = std::make_shared<std::thread>(std::bind(&VxsSensorPublisher::FramePollingLoop, this));
-        ROS_INFO_STREAM("Done!");
+        ROS_INFO_STREAM("Done.");
     }
 
     VxsSensorPublisher::~VxsSensorPublisher()
@@ -269,6 +270,15 @@ namespace vxs_ros1
             }
         }
         frame_polling_thread_ = nullptr;
+
+        if (frame_publishing_thread_)
+        {
+            if (frame_publishing_thread_->joinable())
+            {
+                frame_publishing_thread_->join();
+            }
+        }
+        frame_publishing_thread_ = nullptr;
         vxsdk::vxStopSystem();
     }
 
@@ -373,41 +383,50 @@ namespace vxs_ros1
         while (!flag_shutdown_request_)
         {
             // Wait until data ready. If publishing rgb, then release the rgb capturing loop
-            int N;
+            int N = -1;
+            RawSensorFrame frame_data;
             std::future<void *> sensor_future = std::async(std::launch::async, &VxsSensorPublisher::GetNextSensorFrame, this, std::ref(N));
             cv::Mat rgb_frame;
+            //! Cache the system time that corresponds to the capture time of both RGB (if enabled) and the depth
+            frame_data.stamp = ros::Time::now();
             if (publish_rgb_)
             {
                 // Capture a camera frame in the meanwhile...
                 rgb_frame = GetNextRGBFrame();
             }
+            // Retrieve the opointer to the sensor frame from the SDK
             void *frame_ptr = sensor_future.get();
-            FrameData frame_data;
-            if (publish_events_ && N > 0) // streaming based publishing
+
+            if (publish_events_) // streaming based publishing
             {
                 frame_data.N = N * sizeof(vxsdk::vxXYZT);
+                frame_data.num_entries = N;
                 frame_data.frame_type = TSensorFrame::EventsXYZT;
             }
             else // Frame based data
             {
-                // Data
+                counter++;
                 frame_data.N = SENSOR_WIDTH * SENSOR_HEIGHT * sizeof(float);
+                frame_data.num_entries = SENSOR_WIDTH * SENSOR_HEIGHT;
                 frame_data.frame_type = TSensorFrame::FrameXYZ;
             }
 
-            // Copy into the frame queue and release the publishing thread
-            frame_data.data = std::make_shared<std::vector<uint8_t>>();
-            frame_data.data->resize(frame_data.N);
-            std::memcpy((void *)&(frame_ptr, *frame_data.data)[0], frame_data.N);
-            std::lock_guard<std::mutex> lock(queue_mutex_);
-            if (frame_queue_.size() >= MAX_QUEUE_DEPTH)
+            if ((publish_events_ && N > 0) || !publish_events_)
             {
-                frame_queue_.pop();
-            }
-            frame_queue_.push(frame_data);
-            lock.unlock();
-            queue_cv_.notify_one();
+                // Copy into the frame queue and release the publishing thread
+                frame_data.data = std::make_shared<std::vector<uint8_t>>();
+                frame_data.data->resize(frame_data.N);
 
+                std::memcpy((void *)&(*frame_data.data)[0], frame_ptr, frame_data.N);
+
+                std::unique_lock<std::mutex> lock(queue_mutex_);
+                if (frame_queue_.size() >= MAX_QUEUE_DEPTH)
+                {
+                    frame_queue_.pop();
+                }
+                frame_queue_.push(frame_data);
+                queue_cv_.notify_one();
+            }
             // Check for imu samples. Do this without a worker thread
             if (publish_imu_)
             {
@@ -424,9 +443,9 @@ namespace vxs_ros1
                     // Check if reference time is initialized. @TODO: It should not jappen because IMU is available only in streaming mode
                     {
                         std::unique_lock<std::shared_timed_mutex> lock(ref_time_mutex_);
-                        if (!flag_ref_time_initialized_)
+                        // if (!flag_ref_time_initialized_) // @TODO: The best route is to associate the first IMU sample with the frame stamp (otherwise may experience drift)
                         {
-                            ref_time_ = ros::Time::now() - ros::Duration(imu_samples.rbegin()->stamp_seconds - imu_samples[0].stamp_seconds);
+                            ref_time_ = frame_data.stamp;
                             sensor_ref_time_ = imu_samples[0].stamp_seconds;
                             flag_ref_time_initialized_ = true;
                         }
@@ -434,7 +453,7 @@ namespace vxs_ros1
                     // Now publish imu readings
                     for (int i = 0; i < num_samples; i++)
                     {
-                        PublishIMUSample(imu_samples[i]);
+                        PublishIMUSample(imu_samples[i], frame_data.stamp);
                     }
                 }
             }
@@ -522,13 +541,13 @@ namespace vxs_ros1
 
     void VxsSensorPublisher::PublishingLoop()
     {
-        while (!exit_publishing_.load() && !flag_shutdown_request_)
+        while (!flag_shutdown_request_)
         {
-            FrameData frame_data;
+            RawSensorFrame frame_data;
             {
                 std::unique_lock<std::mutex> lock(queue_mutex_);
                 queue_cv_.wait(lock, [this]
-                               { return !frame_queue_.empty() || exit_publishing_.load() || flag_shutdown_request_; });
+                               { return !frame_queue_.empty() || flag_shutdown_request_; });
 
                 if (frame_queue_.empty())
                     continue;
@@ -539,16 +558,15 @@ namespace vxs_ros1
                 if (publish_events_) // streaming based publishing
                 {
                     vxsdk::vxXYZT *eventsXYZT = (vxsdk::vxXYZT *)&(*frame_data.data)[0];
-                    if (N > 0)
+                    if (frame_data.N > 0)
                     {
-                        PublishStampedPointcloud(N, eventsXYZT);
+                        PublishStampedPointcloud(frame_data.num_entries, eventsXYZT, frame_data.stamp);
                     }
                 }
                 else // Frame based data
                 {
                     // Get data from the sensor
                     float *frameXYZ = (float *)&(*frame_data.data)[0];
-                    counter++;
                     // Extract frame
                     std::vector<cv::Vec3f> points;
 
@@ -556,232 +574,218 @@ namespace vxs_ros1
                     // Publish sensor data as a depth image
                     if (publish_depth_image_)
                     {
-                        PublishDepthImage(frame);
+                        PublishDepthImage(frame, frame_data.stamp);
                     }
                     if (publish_pointcloud_)
                     {
-                        PublishPointcloud(points);
+                        PublishPointcloud(points, frame_data.stamp);
                     }
                 }
             }
         }
     }
 
-}
-
-void VxsSensorPublisher::PublishDepthImage(const cv::Mat &depth_image)
-{
-    cv_bridge::CvImage cv_image(              //
-        std_msgs::Header(),                   //
-        sensor_msgs::image_encodings::MONO16, //
-        depth_image);
-    sensor_msgs::Image depth_image_msg = *cv_image.toImageMsg();
-    depth_image_msg.header.stamp = ros::Time::now();
-    depth_image_msg.header.frame_id = "sensor";
-    depth_image_msg.height = depth_image.rows;
-    depth_image_msg.width = depth_image.cols;
-    depth_image_msg.encoding = sensor_msgs::image_encodings::MONO16;
-
-    // Create camera info message
-    sensor_msgs::CameraInfo cam_info_msg;
-
-    cam_info_msg.header.stamp = depth_image_msg.header.stamp;
-
-    cam_info_msg.header.frame_id = depth_image_msg.header.frame_id;
-    cam_info_msg.width = depth_image_msg.width;
-    cam_info_msg.height = depth_image_msg.height;
-    cam_info_msg.distortion_model = "plumb_bob";
-
-    cam_info_msg.D = {cams_[0].dist[0], cams_[0].dist[1], cams_[0].dist[2], cams_[0].dist[3], cams_[0].dist[4]};
-    cam_info_msg.K = {                                                      //
-                      cams_[0].K(0, 0), cams_[0].K(0, 1), cams_[0].K(0, 2), //
-                      cams_[0].K(1, 0), cams_[0].K(1, 1), cams_[0].K(1, 2), //
-                      cams_[0].K(2, 0), cams_[0].K(2, 1), cams_[0].K(2, 2)};
-    cam_info_msg.R = {                                                      //
-                      cams_[0].R(0, 0), cams_[0].R(0, 1), cams_[0].R(0, 2), //
-                      cams_[0].R(1, 0), cams_[0].R(1, 1), cams_[0].R(1, 2), //
-                      cams_[0].R(2, 0), cams_[0].R(2, 1), cams_[0].R(2, 2)};
-
-    cam_info_msg.P = {                                                         //
-                      cams_[0].K(0, 0), cams_[0].K(0, 1), cams_[0].K(0, 2), 0, //
-                      cams_[0].K(1, 0), cams_[0].K(1, 1), cams_[0].K(1, 2), 0, //
-                      cams_[0].K(2, 0), cams_[0].K(2, 1), cams_[0].K(2, 2)};
-    // publish depth image and camera info
-    depth_publisher_->publish(depth_image_msg);
-    cam_info_publisher_->publish(cam_info_msg);
-}
-
-void VxsSensorPublisher::PublishPointcloud(const std::vector<cv::Vec3f> &points)
-{
-    sensor_msgs::PointCloud2 msg;
-
-    // Set the header
-    msg.header.stamp = ros::Time::now();
-    msg.header.frame_id = "sensor";
-
-    // Unordered pointcloud. Height is 1 and Width is the size (N)
-    const size_t N = points.size();
-    msg.height = 1;
-    msg.width = N;
-
-    // Define the point cloud fields
-    sensor_msgs::PointField x, y, z;
-    x.name = "x";
-    x.offset = 0;
-    x.datatype = sensor_msgs::PointField::FLOAT32;
-    x.count = 1;
-    y.name = "y";
-    y.offset = 4;
-    y.datatype = sensor_msgs::PointField::FLOAT32;
-    y.count = 1;
-    z.name = "z";
-    z.offset = 8;
-    z.datatype = sensor_msgs::PointField::FLOAT32;
-    z.count = 1;
-
-    msg.fields.push_back(x);
-    msg.fields.push_back(y);
-    msg.fields.push_back(z);
-
-    msg.point_step = 12; // Size of a point in bytes
-    msg.row_step = msg.point_step * msg.width;
-
-    // Allocate memory for the point cloud data
-    msg.data.resize(msg.row_step * msg.height);
-
-    // Populate the point cloud data
-    uint8_t *ptr = &msg.data[0];
-    for (size_t i = 0; i < msg.width; ++i)
+    void VxsSensorPublisher::PublishDepthImage(const cv::Mat &depth_image, const ros::Time &stamp)
     {
-        float *point = reinterpret_cast<float *>(ptr);
-        point[0] = points[i][0]; // X coordinate
-        point[1] = points[i][1]; // Y coordinate
-        point[2] = points[i][2]; // Z coordinate
-        ptr += msg.point_step;
+        cv_bridge::CvImage cv_image(              //
+            std_msgs::Header(),                   //
+            sensor_msgs::image_encodings::MONO16, //
+            depth_image);
+        sensor_msgs::Image depth_image_msg = *cv_image.toImageMsg();
+        // depth_image_msg.header.stamp = ros::Time::now();
+        depth_image_msg.header.stamp = stamp;
+        depth_image_msg.header.frame_id = "sensor";
+        depth_image_msg.height = depth_image.rows;
+        depth_image_msg.width = depth_image.cols;
+        depth_image_msg.encoding = sensor_msgs::image_encodings::MONO16;
+
+        // Create camera info message
+        sensor_msgs::CameraInfo cam_info_msg;
+
+        cam_info_msg.header.stamp = depth_image_msg.header.stamp;
+
+        cam_info_msg.header.frame_id = depth_image_msg.header.frame_id;
+        cam_info_msg.width = depth_image_msg.width;
+        cam_info_msg.height = depth_image_msg.height;
+        cam_info_msg.distortion_model = "plumb_bob";
+
+        cam_info_msg.D = {cams_[0].dist[0], cams_[0].dist[1], cams_[0].dist[2], cams_[0].dist[3], cams_[0].dist[4]};
+        cam_info_msg.K = {                                                      //
+                          cams_[0].K(0, 0), cams_[0].K(0, 1), cams_[0].K(0, 2), //
+                          cams_[0].K(1, 0), cams_[0].K(1, 1), cams_[0].K(1, 2), //
+                          cams_[0].K(2, 0), cams_[0].K(2, 1), cams_[0].K(2, 2)};
+        cam_info_msg.R = {                                                      //
+                          cams_[0].R(0, 0), cams_[0].R(0, 1), cams_[0].R(0, 2), //
+                          cams_[0].R(1, 0), cams_[0].R(1, 1), cams_[0].R(1, 2), //
+                          cams_[0].R(2, 0), cams_[0].R(2, 1), cams_[0].R(2, 2)};
+
+        cam_info_msg.P = {                                                         //
+                          cams_[0].K(0, 0), cams_[0].K(0, 1), cams_[0].K(0, 2), 0, //
+                          cams_[0].K(1, 0), cams_[0].K(1, 1), cams_[0].K(1, 2), 0, //
+                          cams_[0].K(2, 0), cams_[0].K(2, 1), cams_[0].K(2, 2)};
+        // publish depth image and camera info
+        depth_publisher_->publish(depth_image_msg);
+        cam_info_publisher_->publish(cam_info_msg);
     }
-    pcloud_publisher_->publish(msg);
-}
 
-void VxsSensorPublisher::PublishStampedPointcloud(const int N, vxsdk::vxXYZT *eventsXYZT)
-{
-    sensor_msgs::PointCloud2 msg;
-
-    // Check if reference time is initialized
+    void VxsSensorPublisher::PublishPointcloud(const std::vector<cv::Vec3f> &points, const ros::Time &stamp)
     {
-        std::unique_lock<std::shared_timed_mutex> lock(ref_time_mutex_);
-        if (!flag_ref_time_initialized_)
+        sensor_msgs::PointCloud2 msg;
+
+        // Set the header
+        // msg.header.stamp = ros::Time::now();
+        msg.header.stamp = stamp;
+        msg.header.frame_id = "sensor";
+
+        // Unordered pointcloud. Height is 1 and Width is the size (N)
+        const size_t N = points.size();
+        msg.height = 1;
+        msg.width = N;
+
+        // Define the point cloud fields
+        sensor_msgs::PointField x, y, z;
+        x.name = "x";
+        x.offset = 0;
+        x.datatype = sensor_msgs::PointField::FLOAT32;
+        x.count = 1;
+        y.name = "y";
+        y.offset = 4;
+        y.datatype = sensor_msgs::PointField::FLOAT32;
+        y.count = 1;
+        z.name = "z";
+        z.offset = 8;
+        z.datatype = sensor_msgs::PointField::FLOAT32;
+        z.count = 1;
+
+        msg.fields.push_back(x);
+        msg.fields.push_back(y);
+        msg.fields.push_back(z);
+
+        msg.point_step = 12; // Size of a point in bytes
+        msg.row_step = msg.point_step * msg.width;
+
+        // Allocate memory for the point cloud data
+        msg.data.resize(msg.row_step * msg.height);
+
+        // Populate the point cloud data
+        uint8_t *ptr = &msg.data[0];
+        for (size_t i = 0; i < msg.width; ++i)
         {
-            ref_time_ = ros::Time::now();
-            sensor_ref_time_ = eventsXYZT[0].timestamp * PERIOD_75_MHZ;
-            msg.header.stamp = ref_time_;
-            flag_ref_time_initialized_ = true;
+            float *point = reinterpret_cast<float *>(ptr);
+            point[0] = points[i][0]; // X coordinate
+            point[1] = points[i][1]; // Y coordinate
+            point[2] = points[i][2]; // Z coordinate
+            ptr += msg.point_step;
+        }
+        pcloud_publisher_->publish(msg);
+    }
+
+    void VxsSensorPublisher::PublishStampedPointcloud(const int N, vxsdk::vxXYZT *eventsXYZT, const ros::Time &cloud_stamp)
+    {
+        sensor_msgs::PointCloud2 msg;
+
+        msg.header.stamp = cloud_stamp;
+        msg.header.frame_id = "sensor";
+
+        // Unordered pointcloud. Height is 1 and Width is the size (N)
+        msg.height = 1;
+        msg.width = N;
+
+        // Define the point cloud fields
+        sensor_msgs::PointField x, y, z, t;
+        x.name = "x";
+        x.offset = 0;
+        x.datatype = sensor_msgs::PointField::FLOAT32;
+        x.count = 1;
+        y.name = "y";
+        y.offset = 4;
+        y.datatype = sensor_msgs::PointField::FLOAT32;
+        y.count = 1;
+        z.name = "z";
+        z.offset = 8;
+        z.datatype = sensor_msgs::PointField::FLOAT32;
+        z.count = 1;
+        t.name = "t";
+        t.offset = 12;
+        t.datatype = sensor_msgs::PointField::FLOAT64;
+        t.count = 1;
+
+        msg.fields.push_back(x);
+        msg.fields.push_back(y);
+        msg.fields.push_back(z);
+        msg.fields.push_back(t);
+
+        msg.point_step = sizeof(float) * 3 + sizeof(double); // Size of a point in bytes
+        msg.row_step = msg.point_step * msg.width;
+
+        // Allocate memory for the point cloud data
+        msg.data.resize(msg.row_step * msg.height);
+
+        // Populate the point cloud data
+        uint8_t *ptr = &msg.data[0];
+        for (size_t i = 0; i < msg.width; ++i)
+        {
+            float *point = reinterpret_cast<float *>(ptr);
+            point[0] = eventsXYZT[i].x;                                                                               // X coordinate
+            point[1] = eventsXYZT[i].y;                                                                               // Y coordinate
+            point[2] = eventsXYZT[i].z;                                                                               // Z coordinate
+            *reinterpret_cast<double *>(ptr + t.offset) = eventsXYZT[i].timestamp * PERIOD_75_MHZ - sensor_ref_time_; // relative to beginning
+            ptr += msg.point_step;
+        }
+        evcloud_publisher_->publish(msg);
+    }
+
+    void VxsSensorPublisher::PublishIMUSample(const imu::IMUSample &sample, const ros::Time &depth_stamp)
+    {
+        sensor_msgs::Imu imu_msg;
+        imu_msg.header.stamp = depth_stamp + ros::Duration(sample.stamp_seconds - sensor_ref_time_);
+        imu_msg.header.frame_id = "IMU";
+
+        //@TODO: Find covariance values from IMU manufacturer
+        imu_msg.orientation_covariance = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        imu_msg.angular_velocity_covariance = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        imu_msg.linear_acceleration_covariance = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+
+        // !TODO: Assign calibrated orientation if necessary
+        imu_msg.orientation.x = 0;
+        imu_msg.orientation.y = 0;
+        imu_msg.orientation.z = 0;
+        imu_msg.orientation.w = 1;
+
+        imu_msg.angular_velocity.x = sample.omegaX;
+        imu_msg.angular_velocity.y = sample.omegaY;
+        imu_msg.angular_velocity.z = sample.omegaZ;
+
+        imu_msg.linear_acceleration.x = sample.aX;
+        imu_msg.linear_acceleration.y = sample.aY;
+        imu_msg.linear_acceleration.z = sample.aZ;
+
+        imu_publisher_->publish(imu_msg);
+    }
+
+    bool VxsSensorPublisher::UpdateObservationWindowCB(
+        vxs_sensor_ros1::UpdateObservationWindow::Request &request,
+        vxs_sensor_ros1::UpdateObservationWindow::Response &result)
+    {
+        if (request.on_time > 10)
+        {
+            result.status_message = "Parameter on_time greater than 10!";
+            result.success = false;
+        }
+        else if (request.period_time < request.on_time)
+        {
+            result.status_message = "Parameter period_time must be greater than on_time!";
+            result.success = false;
         }
         else
         {
-            msg.header.stamp = ref_time_ + ros::Duration(eventsXYZT[0].timestamp * PERIOD_75_MHZ - sensor_ref_time_);
+            on_time_ = request.on_time;
+            period_time_ = request.period_time;
+            result.status_message = "vxs_node: Updating observation window...";
+            result.success = true;
         }
+        flag_update_observation_window_ = true;
+        return true;
     }
-    msg.header.frame_id = "sensor";
-
-    // Unordered pointcloud. Height is 1 and Width is the size (N)
-    msg.height = 1;
-    msg.width = N;
-
-    // Define the point cloud fields
-    sensor_msgs::PointField x, y, z, t;
-    x.name = "x";
-    x.offset = 0;
-    x.datatype = sensor_msgs::PointField::FLOAT32;
-    x.count = 1;
-    y.name = "y";
-    y.offset = 4;
-    y.datatype = sensor_msgs::PointField::FLOAT32;
-    y.count = 1;
-    z.name = "z";
-    z.offset = 8;
-    z.datatype = sensor_msgs::PointField::FLOAT32;
-    z.count = 1;
-    t.name = "t";
-    t.offset = 12;
-    t.datatype = sensor_msgs::PointField::FLOAT64;
-    t.count = 1;
-
-    msg.fields.push_back(x);
-    msg.fields.push_back(y);
-    msg.fields.push_back(z);
-    msg.fields.push_back(t);
-
-    msg.point_step = sizeof(float) * 3 + sizeof(double); // Size of a point in bytes
-    msg.row_step = msg.point_step * msg.width;
-
-    // Allocate memory for the point cloud data
-    msg.data.resize(msg.row_step * msg.height);
-
-    // Populate the point cloud data
-    uint8_t *ptr = &msg.data[0];
-    for (size_t i = 0; i < msg.width; ++i)
-    {
-        float *point = reinterpret_cast<float *>(ptr);
-        point[0] = eventsXYZT[i].x;                                                                               // X coordinate
-        point[1] = eventsXYZT[i].y;                                                                               // Y coordinate
-        point[2] = eventsXYZT[i].z;                                                                               // Z coordinate
-        *reinterpret_cast<double *>(ptr + t.offset) = eventsXYZT[i].timestamp * PERIOD_75_MHZ - sensor_ref_time_; // relative to beginning
-        ptr += msg.point_step;
-    }
-    evcloud_publisher_->publish(msg);
-}
-
-void VxsSensorPublisher::PublishIMUSample(const imu::IMUSample &sample)
-{
-    sensor_msgs::Imu imu_msg;
-    imu_msg.header.stamp = ref_time_ + ros::Duration(sample.stamp_seconds - sensor_ref_time_);
-    imu_msg.header.frame_id = "IMU";
-
-    //@TODO: Find covariance values from IMU manufacturer
-    imu_msg.orientation_covariance = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-    imu_msg.angular_velocity_covariance = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-    imu_msg.linear_acceleration_covariance = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-
-    // !TODO: Assign calibrated orientation if necessary
-    imu_msg.orientation.x = 0;
-    imu_msg.orientation.y = 0;
-    imu_msg.orientation.z = 0;
-    imu_msg.orientation.w = 1;
-
-    imu_msg.angular_velocity.x = sample.omegaX;
-    imu_msg.angular_velocity.y = sample.omegaY;
-    imu_msg.angular_velocity.z = sample.omegaZ;
-
-    imu_msg.linear_acceleration.x = sample.aX;
-    imu_msg.linear_acceleration.y = sample.aY;
-    imu_msg.linear_acceleration.z = sample.aZ;
-
-    imu_publisher_->publish(imu_msg);
-}
-
-bool VxsSensorPublisher::UpdateObservationWindowCB(
-    vxs_sensor_ros1::UpdateObservationWindow::Request &request,
-    vxs_sensor_ros1::UpdateObservationWindow::Response &result)
-{
-    if (request.on_time > 10)
-    {
-        result.status_message = "Parameter on_time greater than 10!";
-        result.success = false;
-    }
-    else if (request.period_time < request.on_time)
-    {
-        result.status_message = "Parameter period_time must be greater than on_time!";
-        result.success = false;
-    }
-    else
-    {
-        on_time_ = request.on_time;
-        period_time_ = request.period_time;
-        result.status_message = "vxs_node: Updating observation window...";
-        result.success = true;
-    }
-    flag_update_observation_window_ = true;
-    return true;
-}
 
 } // end namespace vxs_ros
