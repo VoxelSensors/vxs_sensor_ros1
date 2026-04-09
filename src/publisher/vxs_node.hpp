@@ -124,14 +124,17 @@ namespace vxs_ros1
 
         //! Frame publishing thread
         std::shared_ptr<std::thread> frame_publishing_thread_;
-        //! Frame polling thread
+        //! Sensor frame polling thread
         std::shared_ptr<std::thread> frame_polling_thread_;
+        //! RGB publishing thread
+        std::shared_ptr<std::thread> rgb_publishing_thread_;
 
         std::shared_ptr<ros::Publisher> depth_publisher_;
         std::shared_ptr<ros::Publisher> cam_info_publisher_;
         std::shared_ptr<ros::Publisher> pcloud_publisher_;
         std::shared_ptr<ros::Publisher> evcloud_publisher_;
         std::shared_ptr<ros::Publisher> imu_publisher_;
+        std::shared_ptr<ros::Publisher> gray_publisher_;
 
         //! FPS
         int fps_;
@@ -188,8 +191,12 @@ namespace vxs_ros1
         int sleep_time_ms_;
 
         std::queue<RawSensorFrame> frame_queue_;
-        std::mutex queue_mutex_;
-        std::condition_variable queue_cv_;
+        std::mutex frame_queue_mutex_;
+        std::condition_variable frame_queue_cv_;
+
+        std::queue<RGBFrame> rgb_queue_;
+        std::mutex rgb_queue_mutex_;
+        std::condition_variable rgb_queue_cv_;
 
         //! frame counter
         int frame_counter_;
@@ -220,16 +227,21 @@ namespace vxs_ros1
         cv::Mat GetNextRGBFrame();
 
         //! The main loop of the frame polling thread
-        void FramePollingLoop();
+        void SensorPollingLoop();
         //! Publishing loop (for depth + pointclouds)
-        void PublishingLoop();
+        void SensorPublishingLoop();
+        //! Publishing loop for rgb images (as grayscale)
+        void RGBPublishingLoop();
 
         //! Unpack sensor data into a cv::Mat and return 3D points
         cv::Mat UnpackFrameSensorData(float *frameXYZ, std::vector<cv::Vec3f> &points);
 
         //! Load calilbration from json (required for the formation of the depth map)
         void LoadCalibrationFromJson(const std::string &calib_json);
-        //! Publish image and calibration
+
+        //! Publish grayscale image and calibration
+        void PublishGrayscaleImage(const cv::Mat &rgb, const ros::Time &stamp);
+        //! Publish depth image and calibration
         void PublishDepthImage(const cv::Mat &depth_image, const ros::Time &depth_stamp);
         //! Publish a pointcloud
         void PublishPointcloud(const std::vector<cv::Vec3f> &points, const ros::Time &stamp);

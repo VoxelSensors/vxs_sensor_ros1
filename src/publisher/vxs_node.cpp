@@ -243,6 +243,12 @@ namespace vxs_ros1
             pcloud_publisher_ = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::PointCloud2>("pcloud/cloud", 10));
         }
 
+        gray_publisher_ = nullptr;
+        if (publish_rgb_)
+        {
+            gray_publisher_ = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::Image>("mono/image", 10));
+        }
+
         evcloud_publisher_ = publish_events_ ? std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::PointCloud2>("pcloud/events", 10)) : nullptr;
 
         cam_info_publisher_ = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::CameraInfo>("sensor/camera_info", 10));
@@ -251,11 +257,19 @@ namespace vxs_ros1
 
         //! Start the pointcloud publishing thread
         ROS_INFO_STREAM("Starting frame publishing thread...");
-        frame_publishing_thread_ = std::make_shared<std::thread>(std::bind(&VxsSensorPublisher::PublishingLoop, this));
+        frame_publishing_thread_ = std::make_shared<std::thread>(std::bind(&VxsSensorPublisher::SensorPublishingLoop, this));
         ROS_INFO_STREAM("Done.");
+        //! Start the rgb publishing thread
+        rgb_publishing_thread_ = nullptr;
+        if (publish_rgb_)
+        {
+            ROS_INFO_STREAM("Starting frame publishing thread...");
+            rgb_publishing_thread_ = std::make_shared<std::thread>(std::bind(&VxsSensorPublisher::RGBPublishingLoop, this));
+            ROS_INFO_STREAM("Done.");
+        }
         // Initialize & start polling thread
         ROS_INFO_STREAM("Starting polling thread...");
-        frame_polling_thread_ = std::make_shared<std::thread>(std::bind(&VxsSensorPublisher::FramePollingLoop, this));
+        frame_polling_thread_ = std::make_shared<std::thread>(std::bind(&VxsSensorPublisher::SensorPollingLoop, this));
         ROS_INFO_STREAM("Done.");
     }
 
@@ -319,9 +333,13 @@ namespace vxs_ros1
         if (publish_rgb_)
         {
             // Load RGB calibration
+            std::cout << "Loading rgb calibration...\n";
             LoadRGBCalibration(rgb_calib_filename_, rgb_image_size_, rgbK_, rgbD_);
+            std::cout << "Done.\n";
             // Load sensor to camera relative pose
+            std::cout << "Loading rgb relative pose calibration...\n";
             LoadRGBRelativePose(rgb_pose_calib_filename_, rgbR_cs_, rgbt_cs_);
+            std::cout << "Done.\n";
             // Start the capture
             cam_cap_.open(rgb_cam_index_, cv::CAP_ANY);
             if (!cam_cap_.isOpened())
@@ -376,7 +394,7 @@ namespace vxs_ros1
         return img;
     }
 
-    void VxsSensorPublisher::FramePollingLoop()
+    void VxsSensorPublisher::SensorPollingLoop()
     {
         flag_in_polling_loop_ = true;
         int counter = 0;
@@ -386,13 +404,13 @@ namespace vxs_ros1
             int N = -1;
             RawSensorFrame frame_data;
             std::future<void *> sensor_future = std::async(std::launch::async, &VxsSensorPublisher::GetNextSensorFrame, this, std::ref(N));
-            cv::Mat rgb_frame;
+            cv::Mat rgb_img;
             //! Cache the system time that corresponds to the capture time of both RGB (if enabled) and the depth
             frame_data.stamp = ros::Time::now();
             if (publish_rgb_)
             {
                 // Capture a camera frame in the meanwhile...
-                rgb_frame = GetNextRGBFrame();
+                rgb_img = GetNextRGBFrame();
             }
             // Retrieve the opointer to the sensor frame from the SDK
             void *frame_ptr = sensor_future.get();
@@ -419,14 +437,29 @@ namespace vxs_ros1
 
                 std::memcpy((void *)&(*frame_data.data)[0], frame_ptr, frame_data.N);
 
-                std::unique_lock<std::mutex> lock(queue_mutex_);
+                std::unique_lock<std::mutex> lock(frame_queue_mutex_);
                 if (frame_queue_.size() >= MAX_QUEUE_DEPTH)
                 {
                     frame_queue_.pop();
                 }
                 frame_queue_.push(frame_data);
-                queue_cv_.notify_one();
+                frame_queue_cv_.notify_one();
             }
+
+            if (publish_rgb_)
+            {
+                RGBFrame rgb_data;
+                rgb_data.stamp = frame_data.stamp;
+                rgb_data.img = rgb_img;
+                std::unique_lock<std::mutex> lock(rgb_queue_mutex_);
+                if (rgb_queue_.size() >= MAX_QUEUE_DEPTH)
+                {
+                    rgb_queue_.pop();
+                }
+                rgb_queue_.push(rgb_data);
+                rgb_queue_cv_.notify_one();
+            }
+
             // Check for imu samples. Do this without a worker thread
             if (publish_imu_)
             {
@@ -539,15 +572,15 @@ namespace vxs_ros1
         cams_[1].image_size = cv::Size_<int>(cam2["SensorSize"]["Width"], cam2["SensorSize"]["Height"]);
     }
 
-    void VxsSensorPublisher::PublishingLoop()
+    void VxsSensorPublisher::SensorPublishingLoop()
     {
         while (!flag_shutdown_request_)
         {
             RawSensorFrame frame_data;
             {
-                std::unique_lock<std::mutex> lock(queue_mutex_);
-                queue_cv_.wait(lock, [this]
-                               { return !frame_queue_.empty() || flag_shutdown_request_; });
+                std::unique_lock<std::mutex> lock(frame_queue_mutex_);
+                frame_queue_cv_.wait(lock, [this]
+                                     { return !frame_queue_.empty() || flag_shutdown_request_; });
 
                 if (frame_queue_.empty())
                     continue;
@@ -583,6 +616,39 @@ namespace vxs_ros1
                 }
             }
         }
+    }
+
+    void VxsSensorPublisher::RGBPublishingLoop()
+    {
+        while (!flag_shutdown_request_)
+        {
+            RGBFrame rgb_data;
+            {
+                std::unique_lock<std::mutex> lock(rgb_queue_mutex_);
+                rgb_queue_cv_.wait(lock, [this]
+                                   { return !rgb_queue_.empty() || flag_shutdown_request_; });
+
+                if (rgb_queue_.empty())
+                    continue;
+
+                rgb_data = rgb_queue_.front();
+                rgb_queue_.pop();
+
+                PublishGrayscaleImage(rgb_data.img, rgb_data.stamp);
+            }
+        }
+    }
+
+    void VxsSensorPublisher::PublishGrayscaleImage(const cv::Mat &rgb_img, const ros::Time &stamp)
+    {
+        std_msgs::Header header;
+        header.stamp = stamp;
+        header.frame_id = "mono";
+
+        cv::Mat gray_img;
+        cv::cvtColor(rgb_img, gray_img, cv::COLOR_BGR2GRAY);
+
+        gray_publisher_->publish(cv_bridge::CvImage(header, "mono8", gray_img).toImageMsg());
     }
 
     void VxsSensorPublisher::PublishDepthImage(const cv::Mat &depth_image, const ros::Time &stamp)
