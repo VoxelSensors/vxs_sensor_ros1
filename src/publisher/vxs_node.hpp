@@ -169,6 +169,8 @@ namespace vxs_ros1
 
         //! Publish images (actual grayscale images)
         bool publish_rgb_;
+        //! Name of gray topic
+        std::string gray_topic_ = "";
 
         //! Publish pointcloud
         bool publish_pointcloud_;
@@ -178,6 +180,8 @@ namespace vxs_ros1
 
         //! Publish imu samples (if available)
         bool publish_imu_;
+        //! Name of imu topic
+        std::string imu_topic_ = "";
 
         //! Shut down request flag
         bool flag_shutdown_request_;

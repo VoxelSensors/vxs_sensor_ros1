@@ -204,6 +204,10 @@ namespace vxs_ros1
         nhp.param<std::string>("rgb_calib", rgb_calib_filename_, "");
         nhp.param<std::string>("rgb_pose_calib", rgb_pose_calib_filename_, "");
 
+        // names of imu and rgb topics (non-private!)
+        nhp.param<std::string>("gray_topic", gray_topic_, "");
+        nhp.param<std::string>("imu_topic", imu_topic_, "");
+
         // Print param values
         ROS_INFO_STREAM("Publish frame-based depth image (publlish_depth_image): " << (publish_depth_image_ ? "YES." : "NO."));
         ROS_INFO_STREAM("Publish frame-based pointcloud (publish_pcloud): " << (publish_pointcloud_ ? "YES." : "NO."));
@@ -219,6 +223,9 @@ namespace vxs_ros1
         ROS_INFO_STREAM("FPS: " << fps_ << " and period in ms: " << period_);
         ROS_INFO_STREAM("Config JSON: " << config_json_);
         ROS_INFO_STREAM("Sensor calibration JSON: " << calib_json_);
+
+        ROS_INFO_STREAM("Non-default grayscale topic name: " << gray_topic_);
+        ROS_INFO_STREAM("Non-default imu topic: " << imu_topic_);
 
         // Load calibration into members
         LoadCalibrationFromJson(calib_json_);
@@ -246,14 +253,32 @@ namespace vxs_ros1
         gray_publisher_ = nullptr;
         if (publish_rgb_)
         {
-            gray_publisher_ = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::Image>("mono/image", 10));
+            if (gray_topic_.length() > 0)
+            {
+                gray_publisher_ = std::make_shared<ros::Publisher>(nh_.advertise<sensor_msgs::Image>(gray_topic_, 10));
+            }
+            else
+            {
+                gray_publisher_ = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::Image>("mono/image", 10));
+            }
         }
 
         evcloud_publisher_ = publish_events_ ? std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::PointCloud2>("pcloud/events", 10)) : nullptr;
 
         cam_info_publisher_ = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::CameraInfo>("sensor/camera_info", 10));
 
-        imu_publisher_ = publish_imu_ ? std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::Imu>("imu", 10)) : nullptr;
+        imu_publisher_ = nullptr;
+        if (publish_imu_)
+        {
+            if (imu_topic_.length() > 0)
+            {
+                imu_publisher_ = std::make_shared<ros::Publisher>(nh_.advertise<sensor_msgs::Imu>(imu_topic_, 10));
+            }
+            else
+            {
+                imu_publisher_ = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::Imu>("imu", 10));
+            }
+        }
 
         //! Start the pointcloud publishing thread
         ROS_INFO_STREAM("Starting frame publishing thread...");
@@ -473,19 +498,11 @@ namespace vxs_ros1
                 }
                 if (num_samples > 0)
                 {
-                    // Check if reference time is initialized. @TODO: It should not jappen because IMU is available only in streaming mode
-                    {
-                        std::unique_lock<std::shared_timed_mutex> lock(ref_time_mutex_);
-                        // if (!flag_ref_time_initialized_) // @TODO: The best route is to associate the first IMU sample with the frame stamp (otherwise may experience drift)
-                        {
-                            ref_time_ = frame_data.stamp;
-                            sensor_ref_time_ = imu_samples[0].stamp_seconds;
-                            flag_ref_time_initialized_ = true;
-                        }
-                    }
                     // Now publish imu readings
+                    const double imu_ref_time = imu_samples[0].stamp_seconds;
                     for (int i = 0; i < num_samples; i++)
                     {
+                        ros::Time stamp = frame_data.stamp + ros::Duration(imu_samples[i].stamp_seconds - imu_ref_time);
                         PublishIMUSample(imu_samples[i], frame_data.stamp);
                     }
                 }
@@ -789,22 +806,27 @@ namespace vxs_ros1
 
         // Populate the point cloud data
         uint8_t *ptr = &msg.data[0];
+        const double ref_stamp = eventsXYZT[0].timestamp * PERIOD_75_MHZ;
         for (size_t i = 0; i < msg.width; ++i)
         {
             float *point = reinterpret_cast<float *>(ptr);
-            point[0] = eventsXYZT[i].x;                                                                               // X coordinate
-            point[1] = eventsXYZT[i].y;                                                                               // Y coordinate
-            point[2] = eventsXYZT[i].z;                                                                               // Z coordinate
-            *reinterpret_cast<double *>(ptr + t.offset) = eventsXYZT[i].timestamp * PERIOD_75_MHZ - sensor_ref_time_; // relative to beginning
+            point[0] = eventsXYZT[i].x;                                                                                              // X coordinate
+            point[1] = eventsXYZT[i].y;                                                                                              // Y coordinate
+            point[2] = eventsXYZT[i].z;                                                                                              // Z coordinate
+            *reinterpret_cast<double *>(ptr + t.offset) = eventsXYZT[i].timestamp * PERIOD_75_MHZ - ref_stamp + cloud_stamp.toSec(); // relative to ros message stamp
             ptr += msg.point_step;
         }
         evcloud_publisher_->publish(msg);
     }
 
-    void VxsSensorPublisher::PublishIMUSample(const imu::IMUSample &sample, const ros::Time &depth_stamp)
+    void VxsSensorPublisher::PublishIMUSample(const imu::IMUSample &sample, const ros::Time &stamp)
     {
+        if (stamp > ros::Time::now())
+        {
+            std::cerr << " TIMESTAMP PROBLEM!\n";
+        }
         sensor_msgs::Imu imu_msg;
-        imu_msg.header.stamp = depth_stamp + ros::Duration(sample.stamp_seconds - sensor_ref_time_);
+        imu_msg.header.stamp = stamp;
         imu_msg.header.frame_id = "IMU";
 
         //@TODO: Find covariance values from IMU manufacturer
