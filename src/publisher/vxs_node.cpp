@@ -170,11 +170,13 @@ namespace vxs_ros1
             }
             ROS_INFO_STREAM("Pointcloud publisher: " << (publish_pointcloud_ ? "ENABLED." : "DISABLED.") << std::endl);
             ROS_INFO_STREAM("Depth image publisher: " << (publish_depth_image_ ? "ENABLED." : "DISABLED.") << std::endl);
+            /*
             if (publish_imu_)
             {
                 publish_imu_ = false;
                 ROS_INFO_STREAM("IMU sample will **NOT** be published in frame mode... ");
             }
+                */
         }
 
         ROS_INFO_STREAM("SDK Mode: " << (publish_events_ ? "STREAM." : "FRAME.") << std::endl);
@@ -301,6 +303,8 @@ namespace vxs_ros1
     VxsSensorPublisher::~VxsSensorPublisher()
     {
         flag_shutdown_request_ = true;
+        frame_queue_cv_.notify_one();
+
         if (frame_polling_thread_)
         {
             if (frame_polling_thread_->joinable())
@@ -318,6 +322,16 @@ namespace vxs_ros1
             }
         }
         frame_publishing_thread_ = nullptr;
+
+        if (rgb_publishing_thread_)
+        {
+            rgb_queue_cv_.notify_one();
+            if (rgb_publishing_thread_->joinable())
+            {
+                rgb_publishing_thread_->join();
+            }
+        }
+        rgb_publishing_thread_ = nullptr;
         vxsdk::vxStopSystem();
     }
 
@@ -390,6 +404,7 @@ namespace vxs_ros1
     void *VxsSensorPublisher::GetNextSensorFrame(int &N)
     {
         void *frame_ptr = nullptr;
+
         while (!vxsdk::vxCheckForData())
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time_ms_));
@@ -402,7 +417,10 @@ namespace vxs_ros1
         else // Frame based data
         {
             // Get data from the sensor
-            float *frameXYZ = vxsdk::vxGetFrameXYZ();
+            long long int stamp;
+            float *frameXYZ = vxsdk::vxGetFrameXYZ(stamp);
+            if (!frameXYZ)
+                std::cerr << "NULL XYZ!\n";
             frame_ptr = (void *)frameXYZ;
         }
         return frame_ptr;
@@ -421,7 +439,6 @@ namespace vxs_ros1
 
     void VxsSensorPublisher::SensorPollingLoop()
     {
-        flag_in_polling_loop_ = true;
         int counter = 0;
         while (!flag_shutdown_request_)
         {
@@ -515,7 +532,6 @@ namespace vxs_ros1
                 flag_update_observation_window_ = false;
             }
         }
-        flag_in_polling_loop_ = false;
     }
 
     cv::Mat VxsSensorPublisher::UnpackFrameSensorData(float *frameXYZ, std::vector<cv::Vec3f> &points)

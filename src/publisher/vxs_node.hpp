@@ -184,9 +184,7 @@ namespace vxs_ros1
         std::string imu_topic_ = "";
 
         //! Shut down request flag
-        bool flag_shutdown_request_;
-        //! Flag indicating execution is inside the polling loop.
-        bool flag_in_polling_loop_;
+        std::atomic<bool> flag_shutdown_request_;
         //! A flag forcing update of the observation window with the cached values
         std::atomic<bool> flag_update_observation_window_;
         //! observation window parameters
