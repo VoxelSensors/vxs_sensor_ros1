@@ -204,9 +204,11 @@ namespace vxs_ros1
         int frame_counter_;
 
         //! Reference ros Time for both frames and imu samples.
-        ros::Time ref_time_;
-        //! Reference time in the sensor
+        ros::Time ros_ref_time_;
+        //! Current reference HW stamp in the sensor. Always is the latest depth (or IMU if depth was invalid)
         double sensor_ref_time_;
+        //! The latest HW depth stamp
+        double latest_depth_stamp_;
         //! Flag indicating that reference time is initialized
         bool flag_ref_time_initialized_;
         //! Mutex for reference time members

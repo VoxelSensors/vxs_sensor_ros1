@@ -404,7 +404,7 @@ namespace vxs_ros1
     void *VxsSensorPublisher::GetNextSensorFrame(int &N)
     {
         void *frame_ptr = nullptr;
-
+        latest_depth_stamp_ = 0; // reset in order to check later
         while (!vxsdk::vxCheckForData())
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time_ms_));
@@ -412,7 +412,9 @@ namespace vxs_ros1
         if (publish_events_) // streaming based publishing
         {
             vxsdk::vxXYZT *eventsXYZT = vxsdk::vxGetXYZT(N);
-            frame_ptr = (void *)eventsXYZT;
+            frame_ptr = N > 0 ? (void *)eventsXYZT : nullptr;
+            if (frame_ptr)
+                latest_depth_stamp_ = eventsXYZT[0].timestamp * PERIOD_75_MHZ;
         }
         else // Frame based data
         {
@@ -421,7 +423,10 @@ namespace vxs_ros1
             float *frameXYZ = vxsdk::vxGetFrameXYZ(stamp);
             if (!frameXYZ)
                 std::cerr << "NULL XYZ!\n";
-            frame_ptr = (void *)frameXYZ;
+
+            frame_ptr = stamp == 0 ? nullptr : (void *)frameXYZ;
+            if (frame_ptr)
+                latest_depth_stamp_ = stamp * PERIOD_75_MHZ;
         }
         return frame_ptr;
     }
@@ -471,8 +476,15 @@ namespace vxs_ros1
                 frame_data.frame_type = TSensorFrame::FrameXYZ;
             }
 
-            if ((publish_events_ && N > 0) || !publish_events_)
+            if (frame_ptr)
             {
+                sensor_ref_time_ = latest_depth_stamp_;
+                ros_ref_time_ = frame_data.stamp;
+
+                if (!flag_ref_time_initialized_)
+                {
+                    flag_ref_time_initialized_ = true;
+                }
                 // Copy into the frame queue and release the publishing thread
                 frame_data.data = std::make_shared<std::vector<uint8_t>>();
                 frame_data.data->resize(frame_data.N);
@@ -488,20 +500,6 @@ namespace vxs_ros1
                 frame_queue_cv_.notify_one();
             }
 
-            if (publish_rgb_)
-            {
-                RGBFrame rgb_data;
-                rgb_data.stamp = frame_data.stamp;
-                rgb_data.img = rgb_img;
-                std::unique_lock<std::mutex> lock(rgb_queue_mutex_);
-                if (rgb_queue_.size() >= MAX_QUEUE_DEPTH)
-                {
-                    rgb_queue_.pop();
-                }
-                rgb_queue_.push(rgb_data);
-                rgb_queue_cv_.notify_one();
-            }
-
             // Check for imu samples. Do this without a worker thread
             if (publish_imu_)
             {
@@ -515,14 +513,37 @@ namespace vxs_ros1
                 }
                 if (num_samples > 0)
                 {
-                    // Now publish imu readings
-                    const double imu_ref_time = imu_samples[0].stamp_seconds;
+                    // Get the reference hardware stamp from the imu if the depth was invalid and no reference exists
+                    if (latest_depth_stamp_ == 0)
+                    {
+                        sensor_ref_time_ = imu_samples[0].stamp_seconds;
+                        ros_ref_time_ = frame_data.stamp;
+                    }
+                    if (!flag_ref_time_initialized_)
+                    {
+                        flag_ref_time_initialized_ = true;
+                    }
+
                     for (int i = 0; i < num_samples; i++)
                     {
-                        ros::Time stamp = frame_data.stamp + ros::Duration(imu_samples[i].stamp_seconds - imu_ref_time);
-                        PublishIMUSample(imu_samples[i], frame_data.stamp);
+                        ros::Time stamp = ros_ref_time_ + ros::Duration(imu_samples[i].stamp_seconds - sensor_ref_time_);
+                        PublishIMUSample(imu_samples[i], stamp);
                     }
                 }
+            }
+
+            if (publish_rgb_ && flag_ref_time_initialized_)
+            {
+                RGBFrame rgb_data;
+                rgb_data.stamp = frame_data.stamp; // = ros_ref_time_
+                rgb_data.img = rgb_img;
+                std::unique_lock<std::mutex> lock(rgb_queue_mutex_);
+                if (rgb_queue_.size() >= MAX_QUEUE_DEPTH)
+                {
+                    rgb_queue_.pop();
+                }
+                rgb_queue_.push(rgb_data);
+                rgb_queue_cv_.notify_one();
             }
 
             // Check for observation window update
