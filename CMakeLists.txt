@@ -92,6 +92,8 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/common.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/imu.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/imu.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/depth_filters.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/depth_filters.cpp
 )
 
 set(VXS_NODE_SOURCES 
