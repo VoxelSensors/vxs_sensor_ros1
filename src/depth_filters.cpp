@@ -1,6 +1,6 @@
 #include "depth_filters.hpp"
 #include <iostream>
-namespace vxs_sensor_ros1
+namespace vxs_ros1
 {
     namespace pcl_filters
     {
@@ -196,4 +196,4 @@ namespace vxs_sensor_ros1
         }
 
     } // namespace pcl_filters
-} // namespace vxs_sensor_ros1
+} // namespace vxs_ros1

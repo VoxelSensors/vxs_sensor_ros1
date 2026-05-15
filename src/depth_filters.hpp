@@ -18,7 +18,7 @@
 
 #include <math.h>
 
-namespace vxs_sensor_ros1
+namespace vxs_ros1
 {
     namespace pcl_filters
     {
@@ -99,6 +99,6 @@ namespace vxs_sensor_ros1
             return aligned_depth;
         }
     } // namespace pcl_filters
-} // namespace vxs_sensor_ros1
+} // namespace vxs_ros1
 
 #endif

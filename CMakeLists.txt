@@ -110,6 +110,21 @@ add_dependencies(vxs_node
   ${catkin_EXPORTED_TARGETS}
 )
 
+set(VXS_RGBD_NODE_SOURCES 
+    ${COMMON_SOURCES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/publisher/vxs_rgbd_node.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/publisher/vxs_rgbd_node.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/publisher/vxs_rgbd_node_main.cpp)
+
+add_executable(vxs_rgbd_node ${VXS_RGBD_NODE_SOURCES})
+target_include_directories(vxs_rgbd_node PUBLIC ${VXS_NODE_INCLUDE_DIRS})
+target_link_libraries(vxs_rgbd_node ${OTHER_LIBS})
+add_dependencies(vxs_rgbd_node 
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+)
+
+
 # Install python script
 catkin_install_python(PROGRAMS scripts/vxs_py_subscriber.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

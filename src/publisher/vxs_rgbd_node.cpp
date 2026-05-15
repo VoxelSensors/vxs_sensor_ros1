@@ -5,10 +5,10 @@
 #include <iostream>
 #include <ostream>
 
-#include "publisher/vxs_node.hpp"
+#include "publisher/vxs_rgbd_node.hpp"
 #include "common.hpp"
 #include "imu.hpp"
-#include "pcl_filters.hpp"
+#include "depth_filters.hpp"
 
 #include <cv_bridge/cv_bridge.h>
 #include <sensor_msgs/image_encodings.h>
@@ -169,13 +169,15 @@ namespace vxs_ros1
 
         nhp.param<int>("median_rejection_threshold", filtering_params_.median_rejection_threshold, FilteringParams::DEFAULT_MEDIAN_REJECTION_THRESH);
 
+        nhp.param<int>("rgb_width", rgb_image_size_.width, DEFAULT_RGB_WIDTH);
+        nhp.param<int>("rgb_height", rgb_image_size_.height, DEFAULT_RGB_HEIGHT);
         nhp.param<int>("rgb_cam_index", rgb_cam_index_, -1);
 
         nhp.param<std::string>("rgb_calib", rgb_calib_filename_, "");
         nhp.param<std::string>("rgb_pose_calib", rgb_pose_calib_filename_, "");
 
         // names of imu and rgb topics (non-private!)
-        nhp.param<std::string>("color_topic", rgb_topic_, "/camera/color/image_raw");
+        nhp.param<std::string>("color_topic", color_topic_, "/camera/color/image_raw");
         nhp.param<std::string>("depth_topic", depth_topic_, "/camera/aligned_depth_to_color/image_raw");
         nhp.param<std::string>("color_info", color_info_topic_, "/camera/color/camera_info");
         nhp.param<std::string>("color_info", depth_info_topic_, "/camera/aligned_depth_to_color/camera_info");
@@ -192,7 +194,11 @@ namespace vxs_ros1
         ROS_INFO_STREAM("Config JSON: " << config_json_);
         ROS_INFO_STREAM("Sensor calibration JSON: " << calib_json_);
 
-        ROS_INFO_STREAM("RGB topic name: " << rgb_topic_);
+        ROS_INFO_STREAM("RGB topic name: " << color_topic_);
+        ROS_INFO_STREAM("Depth topic name: " << depth_topic_);
+        ROS_INFO_STREAM("RGB camera info topic name: " << color_info_topic_);
+        ROS_INFO_STREAM("Depth camera info topic name: " << depth_info_topic_);
+
         ROS_INFO_STREAM("IMU topic name: " << imu_topic_);
 
         // Load calibration into members
@@ -207,11 +213,11 @@ namespace vxs_ros1
         }
 
         // Create publishers
-        rgb_publisher_ = std::make_shared<ros::Publisher>(nh_.advertise<sensor_msgs::Image>(rgb_topic_, 10));
-        depth_publisher_ = = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::Image>(depth_topic_, 10));
+        rgb_publisher_ = std::make_shared<ros::Publisher>(nh_.advertise<sensor_msgs::Image>(color_topic_, 10));
+        depth_publisher_ = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::Image>(depth_topic_, 10));
 
-        cam_info_publisher_ = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::CameraInfo>("camera/color/camera_info", 10));
-        depth_info_publisher_ = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::CameraInfo>("camera/aligned_depth_to_color/camera_info", 10));
+        cam_info_publisher_ = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::CameraInfo>(color_info_topic_, 10));
+        depth_info_publisher_ = std::make_shared<ros::Publisher>(nhp_.advertise<sensor_msgs::CameraInfo>(depth_info_topic_, 10));
 
         imu_publisher_ = nullptr;
         if (publish_imu_)
@@ -225,12 +231,10 @@ namespace vxs_ros1
         ROS_INFO_STREAM("Done.");
         //! Start the rgb publishing thread
         rgb_publishing_thread_ = nullptr;
-        if (publish_rgb_)
-        {
-            ROS_INFO_STREAM("Starting frame publishing thread...");
-            rgb_publishing_thread_ = std::make_shared<std::thread>(std::bind(&VxsRGBDPublisher::RGBPublishingLoop, this));
-            ROS_INFO_STREAM("Done.");
-        }
+        ROS_INFO_STREAM("Starting frame publishing thread...");
+        rgb_publishing_thread_ = std::make_shared<std::thread>(std::bind(&VxsRGBDPublisher::RGBPublishingLoop, this));
+        ROS_INFO_STREAM("Done.");
+
         // Initialize & start polling thread
         ROS_INFO_STREAM("Starting polling thread...");
         frame_polling_thread_ = std::make_shared<std::thread>(std::bind(&VxsRGBDPublisher::SensorPollingLoop, this));
@@ -280,16 +284,8 @@ namespace vxs_ros1
 
         // Set the frame rate (or time window)
         vxsdk::vxFlag init_flags;
-        if (publish_events_)
-        {
-            init_flags = vxsdk::vxFlag::XYZT;
-            vxsdk::vxSetStreamingDuration(period_);
-        }
-        else
-        {
-            init_flags = vxsdk::vxFlag::FBPOINTCLOUD;
-            vxsdk::vxSetFPS(fps_);
-        }
+        init_flags = vxsdk::vxFlag::FBPOINTCLOUD;
+        vxsdk::vxSetFPS(fps_);
         if (publish_imu_)
         {
             init_flags = init_flags | vxsdk::vxFlag::IMU;
@@ -305,28 +301,25 @@ namespace vxs_ros1
             filtering_params_.temporal_threshold,         //
             filtering_params_.spatial_threshold);
 
-        // Check if we need to start the webcamera
-        if (publish_rgb_)
+        // start the webcamera
+        // Load RGB calibration
+        std::cout << "Loading rgb calibration...\n";
+        LoadRGBCalibration(rgb_calib_filename_, rgb_image_size_, rgbK_, rgbD_);
+        std::cout << "Done.\n";
+        // Load sensor to camera relative pose
+        std::cout << "Loading rgb relative pose calibration...\n";
+        LoadRGBRelativePose(rgb_pose_calib_filename_, rgbR_cs_, rgbt_cs_);
+        std::cout << "Done.\n";
+        // Start the capture
+        cam_cap_.open(rgb_cam_index_, cv::CAP_ANY);
+        if (!cam_cap_.isOpened())
         {
-            // Load RGB calibration
-            std::cout << "Loading rgb calibration...\n";
-            LoadRGBCalibration(rgb_calib_filename_, rgb_image_size_, rgbK_, rgbD_);
-            std::cout << "Done.\n";
-            // Load sensor to camera relative pose
-            std::cout << "Loading rgb relative pose calibration...\n";
-            LoadRGBRelativePose(rgb_pose_calib_filename_, rgbR_cs_, rgbt_cs_);
-            std::cout << "Done.\n";
-            // Start the capture
-            cam_cap_.open(rgb_cam_index_, cv::CAP_ANY);
-            if (!cam_cap_.isOpened())
-            {
-                std::cerr << "Unable to open camera with " << rgb_cam_index_ << ". Exiting ..." << std::endl;
-                vxsdk::vxStopSystem();
-                exit(0);
-            }
-            cam_cap_.set(cv::CAP_PROP_FRAME_WIDTH, rgb_image_size_.width);
-            cam_cap_.set(cv::CAP_PROP_FRAME_HEIGHT, rgb_image_size_.height);
+            std::cerr << "Unable to open camera with " << rgb_cam_index_ << ". Exiting ..." << std::endl;
+            vxsdk::vxStopSystem();
+            exit(0);
         }
+        cam_cap_.set(cv::CAP_PROP_FRAME_WIDTH, rgb_image_size_.width);
+        cam_cap_.set(cv::CAP_PROP_FRAME_HEIGHT, rgb_image_size_.height);
 
         // Start the SDK Engine.
         int cam_num = vxsdk::vxStartSystem( //
@@ -346,25 +339,16 @@ namespace vxs_ros1
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time_ms_));
         }
-        if (publish_events_) // streaming based publishing
-        {
-            vxsdk::vxXYZT *eventsXYZT = vxsdk::vxGetXYZT(N);
-            frame_ptr = N > 0 ? (void *)eventsXYZT : nullptr;
-            if (frame_ptr)
-                latest_depth_stamp_ = eventsXYZT[0].timestamp * PERIOD_75_MHZ;
-        }
-        else // Frame based data
-        {
-            // Get data from the sensor
-            long long int stamp;
-            float *frameXYZ = vxsdk::vxGetFrameXYZ(stamp);
-            if (!frameXYZ)
-                std::cerr << "NULL XYZ!\n";
+        // Get data from the sensor
+        long long int stamp;
+        float *frameXYZ = vxsdk::vxGetFrameXYZ(stamp);
+        if (!frameXYZ)
+            std::cerr << "NULL XYZ!\n";
 
-            frame_ptr = stamp == 0 ? nullptr : (void *)frameXYZ;
-            if (frame_ptr)
-                latest_depth_stamp_ = stamp * PERIOD_75_MHZ;
-        }
+        frame_ptr = stamp == 0 ? nullptr : (void *)frameXYZ;
+        if (frame_ptr)
+            latest_depth_stamp_ = stamp * PERIOD_75_MHZ;
+
         return frame_ptr;
     }
 
@@ -381,7 +365,6 @@ namespace vxs_ros1
 
     void VxsRGBDPublisher::SensorPollingLoop()
     {
-        int counter = 0;
         while (!flag_shutdown_request_)
         {
             // Wait until data ready. If publishing rgb, then release the rgb capturing loop
@@ -391,27 +374,14 @@ namespace vxs_ros1
             cv::Mat rgb_img;
             //! Cache the system time that corresponds to the capture time of both RGB (if enabled) and the depth
             frame_data.stamp = ros::Time::now();
-            if (publish_rgb_)
-            {
-                // Capture a camera frame in the meanwhile...
-                rgb_img = GetNextRGBFrame();
-            }
+            rgb_img = GetNextRGBFrame();
+
             // Retrieve the opointer to the sensor frame from the SDK
             void *frame_ptr = sensor_future.get();
 
-            if (publish_events_) // streaming based publishing
-            {
-                frame_data.N = N * sizeof(vxsdk::vxXYZT);
-                frame_data.num_entries = N;
-                frame_data.frame_type = TSensorFrame::EventsXYZT;
-            }
-            else // Frame based data
-            {
-                counter++;
-                frame_data.N = SENSOR_WIDTH * SENSOR_HEIGHT * sizeof(float);
-                frame_data.num_entries = SENSOR_WIDTH * SENSOR_HEIGHT;
-                frame_data.frame_type = TSensorFrame::FrameXYZ;
-            }
+            frame_data.N = SENSOR_WIDTH * SENSOR_HEIGHT * sizeof(float);
+            frame_data.num_entries = SENSOR_WIDTH * SENSOR_HEIGHT;
+            frame_data.frame_type = TSensorFrame::FrameXYZ;
 
             if (frame_ptr)
             {
@@ -469,7 +439,7 @@ namespace vxs_ros1
                 }
             }
 
-            if (publish_rgb_ && flag_ref_time_initialized_)
+            if (flag_ref_time_initialized_)
             {
                 RGBFrame rgb_data;
                 rgb_data.stamp = frame_data.stamp; // = ros_ref_time_
@@ -531,7 +501,34 @@ namespace vxs_ros1
                 }
             }
         }
-        return depth;
+        // Resize, Densify and Align depth image to RGB
+        cv::Mat small_depth = pcl_filters::DownsizeDepthImage( //
+            depth.cols / 3,                                    //
+            depth.rows / 3,                                    //
+            depth,                                             //
+            cams_[0].K);
+
+        depth = pcl_filters::UpsizeDepthImage( //
+            rgb_image_size_.width,             //
+            rgb_image_size_.height,            //
+            small_depth,                       //
+            cams_[0].K);
+
+        cv::Matx<float, 3, 3> newvxK = cams_[0].K;
+        const float vxscaler_x = (1.0 * rgb_image_size_.width) / cams_[0].image_size.width;
+        const float vxscaler_y = (1.0 * rgb_image_size_.height) / cams_[0].image_size.height;
+        newvxK(0, 0) *= vxscaler_x;
+        newvxK(0, 2) *= vxscaler_x;
+        newvxK(1, 1) *= vxscaler_y;
+        newvxK(1, 2) *= vxscaler_y;
+        cv::Mat rect_img1 = pcl_filters::AlignDepthToRGB( //
+            depth,                                        //
+            newvxK,                                       //
+            rgbK_,                                        //
+            rgbR_cs_, rgbt_cs_                            //
+        );
+
+        return rect_img1;
     }
 
     void VxsRGBDPublisher::LoadCalibrationFromJson(const std::string &calib_json)
@@ -579,32 +576,14 @@ namespace vxs_ros1
                 frame_data = frame_queue_.front();
                 frame_queue_.pop();
 
-                if (publish_events_) // streaming based publishing
-                {
-                    vxsdk::vxXYZT *eventsXYZT = (vxsdk::vxXYZT *)&(*frame_data.data)[0];
-                    if (frame_data.N > 0)
-                    {
-                        PublishStampedPointcloud(frame_data.num_entries, eventsXYZT, frame_data.stamp);
-                    }
-                }
-                else // Frame based data
-                {
-                    // Get data from the sensor
-                    float *frameXYZ = (float *)&(*frame_data.data)[0];
-                    // Extract frame
-                    std::vector<cv::Vec3f> points;
+                // Get data from the sensor
+                float *frameXYZ = (float *)&(*frame_data.data)[0];
+                // Extract frame
+                std::vector<cv::Vec3f> points;
 
-                    cv::Mat frame = UnpackFrameSensorData(frameXYZ, points);
-                    // Publish sensor data as a depth image
-                    if (publish_depth_image_)
-                    {
-                        PublishDepthImage(frame, frame_data.stamp);
-                    }
-                    if (publish_pointcloud_)
-                    {
-                        PublishPointcloud(points, frame_data.stamp);
-                    }
-                }
+                cv::Mat frame = UnpackFrameSensorData(frameXYZ, points);
+                // Publish sensor data as a depth image
+                PublishDepthImage(frame, frame_data.stamp);
             }
         }
     }
@@ -625,21 +604,18 @@ namespace vxs_ros1
                 rgb_data = rgb_queue_.front();
                 rgb_queue_.pop();
 
-                PublishGrayscaleImage(rgb_data.img, rgb_data.stamp);
+                PublishRGBImage(rgb_data.img, rgb_data.stamp);
             }
         }
     }
 
-    void VxsRGBDPublisher::PublishGrayscaleImage(const cv::Mat &rgb_img, const ros::Time &stamp)
+    void VxsRGBDPublisher::PublishRGBImage(const cv::Mat &rgb_img, const ros::Time &stamp)
     {
         std_msgs::Header header;
         header.stamp = stamp;
-        header.frame_id = "mono";
+        header.frame_id = "color";
 
-        cv::Mat gray_img;
-        cv::cvtColor(rgb_img, gray_img, cv::COLOR_BGR2GRAY);
-
-        gray_publisher_->publish(cv_bridge::CvImage(header, "mono8", gray_img).toImageMsg());
+        rgb_publisher_->publish(cv_bridge::CvImage(header, "bgr8", rgb_img).toImageMsg());
     }
 
     void VxsRGBDPublisher::PublishDepthImage(const cv::Mat &depth_image, const ros::Time &stamp)
@@ -683,114 +659,6 @@ namespace vxs_ros1
         // publish depth image and camera info
         depth_publisher_->publish(depth_image_msg);
         cam_info_publisher_->publish(cam_info_msg);
-    }
-
-    void VxsRGBDPublisher::PublishPointcloud(const std::vector<cv::Vec3f> &points, const ros::Time &stamp)
-    {
-        sensor_msgs::PointCloud2 msg;
-
-        // Set the header
-        // msg.header.stamp = ros::Time::now();
-        msg.header.stamp = stamp;
-        msg.header.frame_id = "sensor";
-
-        // Unordered pointcloud. Height is 1 and Width is the size (N)
-        const size_t N = points.size();
-        msg.height = 1;
-        msg.width = N;
-
-        // Define the point cloud fields
-        sensor_msgs::PointField x, y, z;
-        x.name = "x";
-        x.offset = 0;
-        x.datatype = sensor_msgs::PointField::FLOAT32;
-        x.count = 1;
-        y.name = "y";
-        y.offset = 4;
-        y.datatype = sensor_msgs::PointField::FLOAT32;
-        y.count = 1;
-        z.name = "z";
-        z.offset = 8;
-        z.datatype = sensor_msgs::PointField::FLOAT32;
-        z.count = 1;
-
-        msg.fields.push_back(x);
-        msg.fields.push_back(y);
-        msg.fields.push_back(z);
-
-        msg.point_step = 12; // Size of a point in bytes
-        msg.row_step = msg.point_step * msg.width;
-
-        // Allocate memory for the point cloud data
-        msg.data.resize(msg.row_step * msg.height);
-
-        // Populate the point cloud data
-        uint8_t *ptr = &msg.data[0];
-        for (size_t i = 0; i < msg.width; ++i)
-        {
-            float *point = reinterpret_cast<float *>(ptr);
-            point[0] = points[i][0]; // X coordinate
-            point[1] = points[i][1]; // Y coordinate
-            point[2] = points[i][2]; // Z coordinate
-            ptr += msg.point_step;
-        }
-        pcloud_publisher_->publish(msg);
-    }
-
-    void VxsRGBDPublisher::PublishStampedPointcloud(const int N, vxsdk::vxXYZT *eventsXYZT, const ros::Time &cloud_stamp)
-    {
-        sensor_msgs::PointCloud2 msg;
-
-        msg.header.stamp = cloud_stamp;
-        msg.header.frame_id = "sensor";
-
-        // Unordered pointcloud. Height is 1 and Width is the size (N)
-        msg.height = 1;
-        msg.width = N;
-
-        // Define the point cloud fields
-        sensor_msgs::PointField x, y, z, t;
-        x.name = "x";
-        x.offset = 0;
-        x.datatype = sensor_msgs::PointField::FLOAT32;
-        x.count = 1;
-        y.name = "y";
-        y.offset = 4;
-        y.datatype = sensor_msgs::PointField::FLOAT32;
-        y.count = 1;
-        z.name = "z";
-        z.offset = 8;
-        z.datatype = sensor_msgs::PointField::FLOAT32;
-        z.count = 1;
-        t.name = "t";
-        t.offset = 12;
-        t.datatype = sensor_msgs::PointField::FLOAT64;
-        t.count = 1;
-
-        msg.fields.push_back(x);
-        msg.fields.push_back(y);
-        msg.fields.push_back(z);
-        msg.fields.push_back(t);
-
-        msg.point_step = sizeof(float) * 3 + sizeof(double); // Size of a point in bytes
-        msg.row_step = msg.point_step * msg.width;
-
-        // Allocate memory for the point cloud data
-        msg.data.resize(msg.row_step * msg.height);
-
-        // Populate the point cloud data
-        uint8_t *ptr = &msg.data[0];
-        const double ref_stamp = eventsXYZT[0].timestamp * PERIOD_75_MHZ;
-        for (size_t i = 0; i < msg.width; ++i)
-        {
-            float *point = reinterpret_cast<float *>(ptr);
-            point[0] = eventsXYZT[i].x;                                                                                              // X coordinate
-            point[1] = eventsXYZT[i].y;                                                                                              // Y coordinate
-            point[2] = eventsXYZT[i].z;                                                                                              // Z coordinate
-            *reinterpret_cast<double *>(ptr + t.offset) = eventsXYZT[i].timestamp * PERIOD_75_MHZ - ref_stamp + cloud_stamp.toSec(); // relative to ros message stamp
-            ptr += msg.point_step;
-        }
-        evcloud_publisher_->publish(msg);
     }
 
     void VxsRGBDPublisher::PublishIMUSample(const imu::IMUSample &sample, const ros::Time &stamp)
