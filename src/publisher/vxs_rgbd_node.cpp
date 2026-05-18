@@ -177,10 +177,10 @@ namespace vxs_ros1
         nhp.param<std::string>("rgb_pose_calib", rgb_pose_calib_filename_, "");
 
         // names of imu and rgb topics (non-private!)
-        nhp.param<std::string>("color_topic", color_topic_, "/camera/color/image_raw");
-        nhp.param<std::string>("depth_topic", depth_topic_, "/camera/aligned_depth_to_color/image_raw");
-        nhp.param<std::string>("color_info", color_info_topic_, "/camera/color/camera_info");
-        nhp.param<std::string>("color_info", depth_info_topic_, "/camera/aligned_depth_to_color/camera_info");
+        nhp_.param<std::string>("color_topic", color_topic_, "/camera/color/image_raw");
+        nhp_.param<std::string>("depth_topic", depth_topic_, "/camera/aligned_depth_to_color/image_raw");
+        nhp_.param<std::string>("color_info", color_info_topic_, "/camera/color/camera_info");
+        nhp_.param<std::string>("color_info", depth_info_topic_, "/camera/aligned_depth_to_color/camera_info");
 
         nhp.param<std::string>("imu_topic", imu_topic_, "/camera/imu");
 
@@ -383,29 +383,29 @@ namespace vxs_ros1
             frame_data.num_entries = SENSOR_WIDTH * SENSOR_HEIGHT;
             frame_data.frame_type = TSensorFrame::FrameXYZ;
 
-            if (frame_ptr)
+            // if (frame_ptr)
+            //{
+            sensor_ref_time_ = latest_depth_stamp_;
+            ros_ref_time_ = frame_data.stamp;
+
+            if (!flag_ref_time_initialized_)
             {
-                sensor_ref_time_ = latest_depth_stamp_;
-                ros_ref_time_ = frame_data.stamp;
-
-                if (!flag_ref_time_initialized_)
-                {
-                    flag_ref_time_initialized_ = true;
-                }
-                // Copy into the frame queue and release the publishing thread
-                frame_data.data = std::make_shared<std::vector<uint8_t>>();
-                frame_data.data->resize(frame_data.N);
-
-                std::memcpy((void *)&(*frame_data.data)[0], frame_ptr, frame_data.N);
-
-                std::unique_lock<std::mutex> lock(frame_queue_mutex_);
-                if (frame_queue_.size() >= MAX_QUEUE_DEPTH)
-                {
-                    frame_queue_.pop();
-                }
-                frame_queue_.push(frame_data);
-                frame_queue_cv_.notify_one();
+                flag_ref_time_initialized_ = true;
             }
+            // Copy into the frame queue and release the publishing thread
+            frame_data.data = std::make_shared<std::vector<uint8_t>>();
+            frame_data.data->resize(frame_data.N);
+
+            std::memcpy((void *)&(*frame_data.data)[0], frame_ptr, frame_data.N);
+
+            std::unique_lock<std::mutex> lock(frame_queue_mutex_);
+            if (frame_queue_.size() >= MAX_QUEUE_DEPTH)
+            {
+                frame_queue_.pop();
+            }
+            frame_queue_.push(frame_data);
+            frame_queue_cv_.notify_one();
+            //}
 
             // Check for imu samples. Do this without a worker thread
             if (publish_imu_)
@@ -477,28 +477,28 @@ namespace vxs_ros1
             for (size_t c = 0; c < SENSOR_WIDTH; c++)
             {
                 const float &Z = frameXYZ[(r * SENSOR_WIDTH + c) * 3 + 2];
-                if (Z > 1e-5)
+                if (Z < 1e-5 || Z > 5 * 1e+3)
                 {
-                    const float &X = frameXYZ[(r * SENSOR_WIDTH + c) * 3];
-                    const float &Y = frameXYZ[(r * SENSOR_WIDTH + c) * 3 + 1];
-
-                    // Keep the point, irrespective of visibility on sensor (it shouldn't be happening though...)
-                    points.emplace_back(X, Y, Z);
-
-                    const int x = std::lround(X / Z * fx + cx);
-                    const int y = std::lround(Y / Z * fy + cy);
-
-                    //  Check for negatives and out-of-bounds
-                    if (y < 0 || y > SENSOR_HEIGHT - 1 || //
-                        x < 0 || x > SENSOR_WIDTH - 1)
-                    {
-                        continue;
-                    }
-
-                    // Get a 16-bit approximation and save at x, y location
-                    uint16_t iZ = std::lround(Z);
-                    depth.at<uint16_t>(y, x) = iZ;
+                    continue;
                 }
+                const float &X = frameXYZ[(r * SENSOR_WIDTH + c) * 3];
+                const float &Y = frameXYZ[(r * SENSOR_WIDTH + c) * 3 + 1];
+
+                // Keep the point, irrespective of visibility on sensor (it shouldn't be happening though...)
+                points.emplace_back(X, Y, Z);
+
+                const int x = std::lround(X / Z * fx + cx);
+                const int y = std::lround(Y / Z * fy + cy);
+
+                //  Check for negatives and out-of-bounds
+                if (y < 0 || y > SENSOR_HEIGHT - 1 || //
+                    x < 0 || x > SENSOR_WIDTH - 1)
+                {
+                    continue;
+                }
+                // Get a 16-bit approximation and save at x, y location
+                uint16_t iZ = std::lround(Z);
+                depth.at<uint16_t>(y, x) = iZ;
             }
         }
         // Resize, Densify and Align depth image to RGB
@@ -521,6 +521,7 @@ namespace vxs_ros1
         newvxK(0, 2) *= vxscaler_x;
         newvxK(1, 1) *= vxscaler_y;
         newvxK(1, 2) *= vxscaler_y;
+
         cv::Mat rect_img1 = pcl_filters::AlignDepthToRGB( //
             depth,                                        //
             newvxK,                                       //
@@ -615,7 +616,33 @@ namespace vxs_ros1
         header.stamp = stamp;
         header.frame_id = "color";
 
+        // Create camera info message
+        sensor_msgs::CameraInfo cam_info_msg;
+
+        cam_info_msg.header.stamp = header.stamp;
+
+        cam_info_msg.header.frame_id = header.frame_id;
+        cam_info_msg.width = rgb_image_size_.width;
+        cam_info_msg.height = rgb_image_size_.height;
+        cam_info_msg.distortion_model = "plumb_bob";
+
+        cam_info_msg.D = {rgbD_[0], rgbD_[1], rgbD_[2], rgbD_[3], rgbD_[4]};
+        cam_info_msg.K = {                                       //
+                          rgbK_(0, 0), rgbK_(0, 1), rgbK_(0, 2), //
+                          rgbK_(1, 0), rgbK_(1, 1), rgbK_(1, 2), //
+                          rgbK_(2, 0), rgbK_(2, 1), rgbK_(2, 2)};
+        cam_info_msg.R = {               //
+                          1.0, 0.0, 0.0, //
+                          0.0, 1.0, 0.0, //
+                          0.0, 0.0, 1.0};
+
+        cam_info_msg.P = {                                          //
+                          rgbK_(0, 0), rgbK_(0, 1), rgbK_(0, 2), 0, //
+                          rgbK_(1, 0), rgbK_(1, 1), rgbK_(1, 2), 0, //
+                          rgbK_(2, 0), rgbK_(2, 1), rgbK_(2, 2)};
+        // publish color image and camera info
         rgb_publisher_->publish(cv_bridge::CvImage(header, "bgr8", rgb_img).toImageMsg());
+        cam_info_publisher_->publish(cam_info_msg);
     }
 
     void VxsRGBDPublisher::PublishDepthImage(const cv::Mat &depth_image, const ros::Time &stamp)
@@ -633,32 +660,35 @@ namespace vxs_ros1
         depth_image_msg.encoding = sensor_msgs::image_encodings::MONO16;
 
         // Create camera info message
-        sensor_msgs::CameraInfo cam_info_msg;
+        sensor_msgs::CameraInfo depth_info_msg;
 
-        cam_info_msg.header.stamp = depth_image_msg.header.stamp;
+        depth_info_msg.header.stamp = depth_image_msg.header.stamp;
 
-        cam_info_msg.header.frame_id = depth_image_msg.header.frame_id;
-        cam_info_msg.width = depth_image_msg.width;
-        cam_info_msg.height = depth_image_msg.height;
-        cam_info_msg.distortion_model = "plumb_bob";
+        depth_info_msg.header.frame_id = depth_image_msg.header.frame_id;
+        depth_info_msg.width = depth_image_msg.width;
+        depth_info_msg.height = depth_image_msg.height;
+        depth_info_msg.distortion_model = "plumb_bob";
 
-        cam_info_msg.D = {cams_[0].dist[0], cams_[0].dist[1], cams_[0].dist[2], cams_[0].dist[3], cams_[0].dist[4]};
-        cam_info_msg.K = {                                                      //
-                          cams_[0].K(0, 0), cams_[0].K(0, 1), cams_[0].K(0, 2), //
-                          cams_[0].K(1, 0), cams_[0].K(1, 1), cams_[0].K(1, 2), //
-                          cams_[0].K(2, 0), cams_[0].K(2, 1), cams_[0].K(2, 2)};
-        cam_info_msg.R = {                                                      //
-                          cams_[0].R(0, 0), cams_[0].R(0, 1), cams_[0].R(0, 2), //
-                          cams_[0].R(1, 0), cams_[0].R(1, 1), cams_[0].R(1, 2), //
-                          cams_[0].R(2, 0), cams_[0].R(2, 1), cams_[0].R(2, 2)};
+        const float scaler_x = depth_image_msg.width / (1.0 * SENSOR_WIDTH);
+        const float scaler_y = depth_image_msg.height / (1.0 * SENSOR_HEIGHT);
 
-        cam_info_msg.P = {                                                         //
-                          cams_[0].K(0, 0), cams_[0].K(0, 1), cams_[0].K(0, 2), 0, //
-                          cams_[0].K(1, 0), cams_[0].K(1, 1), cams_[0].K(1, 2), 0, //
-                          cams_[0].K(2, 0), cams_[0].K(2, 1), cams_[0].K(2, 2)};
+        depth_info_msg.D = {cams_[0].dist[0], cams_[0].dist[1], cams_[0].dist[2], cams_[0].dist[3], cams_[0].dist[4]};
+        depth_info_msg.K = {                                                                                       //
+                            scaler_x * cams_[0].K(0, 0), scaler_x * cams_[0].K(0, 1), scaler_x * cams_[0].K(0, 2), //
+                            scaler_y * cams_[0].K(1, 0), scaler_y * cams_[0].K(1, 1), scaler_y * cams_[0].K(1, 2), //
+                            cams_[0].K(2, 0), cams_[0].K(2, 1), cams_[0].K(2, 2)};
+        depth_info_msg.R = {                                                      //
+                            cams_[0].R(0, 0), cams_[0].R(0, 1), cams_[0].R(0, 2), //
+                            cams_[0].R(1, 0), cams_[0].R(1, 1), cams_[0].R(1, 2), //
+                            cams_[0].R(2, 0), cams_[0].R(2, 1), cams_[0].R(2, 2)};
+
+        depth_info_msg.P = {                                                                                          //
+                            scaler_x * cams_[0].K(0, 0), scaler_x * cams_[0].K(0, 1), scaler_x * cams_[0].K(0, 2), 0, //
+                            scaler_y * cams_[0].K(1, 0), scaler_y * cams_[0].K(1, 1), scaler_y * cams_[0].K(1, 2), 0, //
+                            cams_[0].K(2, 0), cams_[0].K(2, 1), cams_[0].K(2, 2)};
         // publish depth image and camera info
         depth_publisher_->publish(depth_image_msg);
-        cam_info_publisher_->publish(cam_info_msg);
+        depth_info_publisher_->publish(depth_info_msg);
     }
 
     void VxsRGBDPublisher::PublishIMUSample(const imu::IMUSample &sample, const ros::Time &stamp)

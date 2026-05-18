@@ -188,7 +188,11 @@ namespace vxs_ros1
                     }
                     if (positive_depth_count > 0)
                     {
-                        big_depth.at<uint16_t>(y, x) = std::lround(depth_avg / positive_depth_count);
+                        depth_avg /= positive_depth_count;
+                        if (depth_avg > 4)
+                        {
+                            big_depth.at<uint16_t>(y, x) = std::lround(depth_avg / positive_depth_count);
+                        }
                     }
                 }
             }

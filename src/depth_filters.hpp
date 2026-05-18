@@ -82,6 +82,7 @@ namespace vxs_ros1
                     M *= static_cast<double>(d);
                     // Now project onto the RGB image
                     const cv::Vec<double, 3> Mc = R * M + t;
+
                     if (Mc[2] < 1e-4)
                     {
                         continue;
