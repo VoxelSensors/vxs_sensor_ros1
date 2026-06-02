@@ -471,7 +471,7 @@ namespace vxs_ros1
             else // Frame based data
             {
                 counter++;
-                frame_data.N = SENSOR_WIDTH * SENSOR_HEIGHT * sizeof(float);
+                frame_data.N = 3 * SENSOR_WIDTH * SENSOR_HEIGHT * sizeof(float); // NOTE: The 3 here is for the 3 coordinates of the 3D point.
                 frame_data.num_entries = SENSOR_WIDTH * SENSOR_HEIGHT;
                 frame_data.frame_type = TSensorFrame::FrameXYZ;
             }
@@ -574,7 +574,6 @@ namespace vxs_ros1
                 {
                     const float &X = frameXYZ[(r * SENSOR_WIDTH + c) * 3];
                     const float &Y = frameXYZ[(r * SENSOR_WIDTH + c) * 3 + 1];
-
                     // Keep the point, irrespective of visibility on sensor (it shouldn't be happening though...)
                     points.emplace_back(X, Y, Z);
 
@@ -587,9 +586,9 @@ namespace vxs_ros1
                     {
                         continue;
                     }
-
                     // Get a 16-bit approximation and save at x, y location
                     uint16_t iZ = std::lround(Z);
+                    // std::cout << "x, y: " << x << ", " << y << std::endl;
                     depth.at<uint16_t>(y, x) = iZ;
                 }
             }
@@ -844,6 +843,7 @@ namespace vxs_ros1
         // Populate the point cloud data
         uint8_t *ptr = &msg.data[0];
         const double ref_stamp = eventsXYZT[0].timestamp * PERIOD_75_MHZ;
+        // std::cout << "Pcloud size: " << msg.width << std::endl;
         for (size_t i = 0; i < msg.width; ++i)
         {
             float *point = reinterpret_cast<float *>(ptr);
@@ -852,6 +852,7 @@ namespace vxs_ros1
             point[2] = eventsXYZT[i].z;                                                                                              // Z coordinate
             *reinterpret_cast<double *>(ptr + t.offset) = eventsXYZT[i].timestamp * PERIOD_75_MHZ - ref_stamp + cloud_stamp.toSec(); // relative to ros message stamp
             ptr += msg.point_step;
+            // std::cout << "STAMP: " << eventsXYZT[i].timestamp << std::endl;
         }
         evcloud_publisher_->publish(msg);
     }

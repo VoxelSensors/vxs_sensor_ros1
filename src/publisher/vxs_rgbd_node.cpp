@@ -15,6 +15,27 @@
 
 namespace
 {
+    cv::Mat ScaleDepth(const cv::Mat &depth)
+    {
+        cv::Mat gray = cv::Mat(depth.size(), CV_8U);
+        double MAX_DEPTH, MIN_DEPTH;
+        cv::Point min_index, max_index;
+        cv::minMaxLoc(depth, &MIN_DEPTH, &MAX_DEPTH, &min_index, &max_index);
+
+        for (int r = 0; r < depth.rows; r++)
+        {
+            uint16_t *depth_data = (uint16_t *)(depth.data + r * depth.step);
+
+            uint8_t *gray_data = (uint8_t *)(gray.data + r * gray.step);
+
+            for (int c = 0; c < depth.cols; c++)
+            {
+                gray_data[c] = std::lround((depth_data[c] - MIN_DEPTH) * 255.0 / (MAX_DEPTH - MIN_DEPTH));
+            }
+        }
+        return gray;
+    }
+
     //! Load RGB calibration from **yaml**
     bool LoadRGBCalibration(               //
         const std::string &rgb_calib_yaml, //
@@ -110,7 +131,7 @@ namespace
         // Extract line #2 tokens
         std::vector<std::string> line2_strings = SplitLine(line);
         t_cs = {static_cast<float>(atof(line2_strings[0].c_str())), static_cast<float>(atof(line2_strings[1].c_str())), static_cast<float>(atof(line2_strings[2].c_str()))};
-        // t_cs *= 0.001;
+        // t_cs = 0.001;
         //
         //
 
@@ -476,19 +497,19 @@ namespace vxs_ros1
         {
             for (size_t c = 0; c < SENSOR_WIDTH; c++)
             {
-                const float &Z = frameXYZ[(r * SENSOR_WIDTH + c) * 3 + 2];
+                const float Z = frameXYZ[(r * SENSOR_WIDTH + c) * 3 + 2];
                 if (Z < 1e-5 || Z > 5 * 1e+3)
                 {
                     continue;
                 }
-                const float &X = frameXYZ[(r * SENSOR_WIDTH + c) * 3];
-                const float &Y = frameXYZ[(r * SENSOR_WIDTH + c) * 3 + 1];
+                const float X = frameXYZ[(r * SENSOR_WIDTH + c) * 3];
+                const float Y = frameXYZ[(r * SENSOR_WIDTH + c) * 3 + 1];
 
                 // Keep the point, irrespective of visibility on sensor (it shouldn't be happening though...)
                 points.emplace_back(X, Y, Z);
 
-                const int x = std::lround(X / Z * fx + cx);
-                const int y = std::lround(Y / Z * fy + cy);
+                const int x = std::lround(X / (1.0 * Z) * fx + cx);
+                const int y = std::lround(Y / (1.0 * Z) * fy + cy);
 
                 //  Check for negatives and out-of-bounds
                 if (y < 0 || y > SENSOR_HEIGHT - 1 || //
@@ -501,6 +522,10 @@ namespace vxs_ros1
                 depth.at<uint16_t>(y, x) = iZ;
             }
         }
+        cv::Mat disp_img1 = ScaleDepth(depth);
+        cv::imshow("org. depth", disp_img1);
+        cv::waitKey(2);
+
         // Resize, Densify and Align depth image to RGB
         cv::Mat small_depth = pcl_filters::DownsizeDepthImage( //
             depth.cols / 3,                                    //
@@ -529,6 +554,9 @@ namespace vxs_ros1
             rgbR_cs_, rgbt_cs_                            //
         );
 
+        cv::Mat disp_img = ScaleDepth(rect_img1);
+        cv::imshow("depth", disp_img);
+        cv::waitKey(2);
         return rect_img1;
     }
 
@@ -626,7 +654,10 @@ namespace vxs_ros1
         cam_info_msg.height = rgb_image_size_.height;
         cam_info_msg.distortion_model = "plumb_bob";
 
-        cam_info_msg.D = {rgbD_[0], rgbD_[1], rgbD_[2], rgbD_[3], rgbD_[4]};
+        // @TODO: Not sure if its better ti publish distortion...
+        // cam_info_msg.D = {rgbD_[0], rgbD_[1], rgbD_[2], rgbD_[3], rgbD_[4]};
+        cam_info_msg.D = {0, 0, 0, 0};
+
         cam_info_msg.K = {                                       //
                           rgbK_(0, 0), rgbK_(0, 1), rgbK_(0, 2), //
                           rgbK_(1, 0), rgbK_(1, 1), rgbK_(1, 2), //
@@ -639,10 +670,12 @@ namespace vxs_ros1
         cam_info_msg.P = {                                          //
                           rgbK_(0, 0), rgbK_(0, 1), rgbK_(0, 2), 0, //
                           rgbK_(1, 0), rgbK_(1, 1), rgbK_(1, 2), 0, //
-                          rgbK_(2, 0), rgbK_(2, 1), rgbK_(2, 2)};
+                          rgbK_(2, 0), rgbK_(2, 1), rgbK_(2, 2), 0};
         // publish color image and camera info
         rgb_publisher_->publish(cv_bridge::CvImage(header, "bgr8", rgb_img).toImageMsg());
         cam_info_publisher_->publish(cam_info_msg);
+        cv::imshow("rgb", rgb_img);
+        cv::waitKey(2);
     }
 
     void VxsRGBDPublisher::PublishDepthImage(const cv::Mat &depth_image, const ros::Time &stamp)
@@ -677,10 +710,10 @@ namespace vxs_ros1
                             scaler_x * cams_[0].K(0, 0), scaler_x * cams_[0].K(0, 1), scaler_x * cams_[0].K(0, 2), //
                             scaler_y * cams_[0].K(1, 0), scaler_y * cams_[0].K(1, 1), scaler_y * cams_[0].K(1, 2), //
                             cams_[0].K(2, 0), cams_[0].K(2, 1), cams_[0].K(2, 2)};
-        depth_info_msg.R = {                                                      //
-                            cams_[0].R(0, 0), cams_[0].R(0, 1), cams_[0].R(0, 2), //
-                            cams_[0].R(1, 0), cams_[0].R(1, 1), cams_[0].R(1, 2), //
-                            cams_[0].R(2, 0), cams_[0].R(2, 1), cams_[0].R(2, 2)};
+        depth_info_msg.R = {         //
+                            1, 0, 0, //
+                            0, 1, 0, //
+                            0, 0, 1};
 
         depth_info_msg.P = {                                                                                          //
                             scaler_x * cams_[0].K(0, 0), scaler_x * cams_[0].K(0, 1), scaler_x * cams_[0].K(0, 2), 0, //
