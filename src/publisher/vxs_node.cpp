@@ -182,7 +182,7 @@ namespace vxs_ros1
         ROS_INFO_STREAM("SDK Mode: " << (publish_events_ ? "STREAM." : "FRAME.") << std::endl);
         ROS_INFO_STREAM("Publish IMU: " << (publish_imu_ ? "YES." : "NO.") << std::endl);
 
-        nhp.param<std::string>("config_json", config_json_, "config/and2_median_golden.json");
+        nhp.param<std::string>("config_json", config_json_, "config/and2_noMedian_golden_imu_1.json");
         nhp.param<std::string>("calib_json", calib_json_, "config/default_calib.json");
 
         // Filtering parameters
@@ -403,12 +403,16 @@ namespace vxs_ros1
 
     void *VxsSensorPublisher::GetNextSensorFrame(int &N)
     {
+        auto start = std::chrono::system_clock::now();
         void *frame_ptr = nullptr;
         latest_depth_stamp_ = 0; // reset in order to check later
         while (!vxsdk::vxCheckForData())
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time_ms_));
         }
+
+        auto finish = std::chrono::system_clock::now();
+
         if (publish_events_) // streaming based publishing
         {
             vxsdk::vxXYZT *eventsXYZT = vxsdk::vxGetXYZT(N);
@@ -419,8 +423,10 @@ namespace vxs_ros1
         else // Frame based data
         {
             // Get data from the sensor
-            long long int stamp;
+            long long int stamp = -2;
             float *frameXYZ = vxsdk::vxGetFrameXYZ(stamp);
+            // float *frameXYZ = vxsdk::vxGetFrameXYZ();
+
             if (!frameXYZ)
                 std::cerr << "NULL XYZ!\n";
 
@@ -428,6 +434,9 @@ namespace vxs_ros1
             if (frame_ptr)
                 latest_depth_stamp_ = stamp * PERIOD_75_MHZ;
         }
+
+        std::cout << std::chrono::duration_cast<std::chrono::milliseconds>(finish - start).count() << "ms" << std::endl;
+
         return frame_ptr;
     }
 
