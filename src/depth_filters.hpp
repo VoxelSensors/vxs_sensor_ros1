@@ -29,15 +29,17 @@ namespace vxs_ros1
             const cv::Mat &depth,                 //
             const cv::Matx<float, 3, 3> &K,       //
             std::vector<cv::Vec3f> &new_points3d, //
+            cv::Matx<float, 3, 3> &newK,          //
             const float &depth_scaler = 0.001     // default is 1 mm
         );
 
         //! Resize depth image to smaller scale (without returning a pointcloud)
-        cv::Mat DownsizeDepthImage( //
-            const int new_width,    //
-            const int new_height,   //
-            const cv::Mat &depth,   //
-            const cv::Matx<float, 3, 3> &K);
+        cv::Mat DownsizeDepthImage(         //
+            const int new_width,            //
+            const int new_height,           //
+            const cv::Mat &depth,           //
+            const cv::Matx<float, 3, 3> &K, //
+            cv::Matx<float, 3, 3> &newK);
 
         //! Resize depth image to a bigger one using nearest **no-zero-depth** neighbor
         cv::Mat UpsizeDepthImage( //

@@ -10,6 +10,7 @@ namespace vxs_ros1
             const cv::Mat &depth,                 //
             const cv::Matx<float, 3, 3> &K,       //
             std::vector<cv::Vec3f> &new_points3d, //
+            cv::Matx<float, 3, 3> &newK,          //
             const float &depth_scaler)
         {
             CV_Assert(depth.type() == CV_16U || depth.type() == CV_16S || depth.type() == CV_16UC1);
@@ -24,7 +25,7 @@ namespace vxs_ros1
             const float newcx = K(0, 2) * scaler_orgX_to_smallX;
             const float newfy = K(1, 1) * scaler_orgY_to_smallY;
             const float newcy = K(1, 2) * scaler_orgY_to_smallY;
-
+            newK = {newfx, 0, newcx, 0, newfy, newcy, 0, 0, 1};
             // Scale with filling
             cv::resize(depth, small_depth, cv::Size_<int>(new_width, new_height));
             int depth_counter = 0;
@@ -74,11 +75,12 @@ namespace vxs_ros1
             return small_depth;
         }
 
-        cv::Mat DownsizeDepthImage( //
-            const int new_width,    //
-            const int new_height,   //
-            const cv::Mat &depth,   //
-            const cv::Matx<float, 3, 3> &K)
+        cv::Mat DownsizeDepthImage(         //
+            const int new_width,            //
+            const int new_height,           //
+            const cv::Mat &depth,           //
+            const cv::Matx<float, 3, 3> &K, //
+            cv::Matx<float, 3, 3> &newK)
         {
             CV_Assert(depth.type() == CV_16U || depth.type() == CV_16S || depth.type() == CV_16UC1);
             cv::Mat small_depth(new_height, new_width, CV_16UC1);
@@ -90,6 +92,7 @@ namespace vxs_ros1
             const float newcx = K(0, 2) * scaler_orgX_to_smallX;
             const float newfy = K(1, 1) * scaler_orgY_to_smallY;
             const float newcy = K(1, 2) * scaler_orgY_to_smallY;
+            newK = {newfx, 0, newcx, 0, newfy, newcy, 0, 0, 1};
 
             // Scale with filling
             // cv::resize(depth, small_depth, cv::Size_<int>(new_width, new_height));
@@ -138,36 +141,35 @@ namespace vxs_ros1
             return small_depth;
         }
 
+        // Corrected UpsizeDepthImage. Fixes:
+        //   (5) double-division by positive_depth_count (was shrinking every depth,
+        //       pulling points toward the camera).
+        //   (6) y coordinate was scaled by the X scaler; use the Y scaler so non-square
+        //       images sample the correct source row.
         cv::Mat UpsizeDepthImage( //
             const int new_width,  //
             const int new_height, //
             const cv::Mat &depth, //
             const cv::Matx<float, 3, 3> &K)
         {
-            CV_Assert((depth.type() == CV_16U || depth.type() == CV_16S || depth.type() == CV_16UC1) && depth.rows <= new_height && depth.cols <= new_width);
-            cv::Mat big_depth(new_height, new_width, CV_16UC1);
-            big_depth *= 0;
+            CV_Assert((depth.type() == CV_16U || depth.type() == CV_16S || depth.type() == CV_16UC1) &&
+                      depth.rows <= new_height && depth.cols <= new_width);
+            cv::Mat big_depth = cv::Mat::zeros(new_height, new_width, CV_16UC1);
+
             const float scaler_orgX_to_bigX = (1.0f * new_width) / depth.cols;
             const float scaler_orgY_to_bigY = (1.0f * new_height) / depth.rows;
             const float scaler_bigX_to_orgX = 1.0f / scaler_orgX_to_bigX;
             const float scaler_bigY_to_orgY = 1.0f / scaler_orgY_to_bigY;
-
-            const float newfx = K(0, 0) * scaler_orgX_to_bigX;
-            const float newcx = K(0, 2) * scaler_orgX_to_bigX;
-            const float newfy = K(1, 1) * scaler_orgY_to_bigY;
-            const float newcy = K(1, 2) * scaler_orgY_to_bigY;
-
-            int depth_counter = 0;
 
             for (int y = 0; y < big_depth.rows; y++)
             {
                 for (int x = 0; x < big_depth.cols; x++)
                 {
                     const float x0 = scaler_bigX_to_orgX * x;
-                    const float y0 = scaler_bigX_to_orgX * y;
+                    const float y0 = scaler_bigY_to_orgY * y; // FIX (6): was scaler_bigX_to_orgX * y
 
-                    int xx0 = std::lround(x0);
-                    int yy0 = std::lround(y0);
+                    const int xx0 = std::lround(x0);
+                    const int yy0 = std::lround(y0);
                     int positive_depth_count = 0;
                     float depth_avg = 0;
                     for (int dx = -1; dx < 2; dx++)
@@ -188,10 +190,10 @@ namespace vxs_ros1
                     }
                     if (positive_depth_count > 0)
                     {
-                        depth_avg /= positive_depth_count;
+                        depth_avg /= positive_depth_count; // average
                         if (depth_avg > 4)
                         {
-                            big_depth.at<uint16_t>(y, x) = std::lround(depth_avg / positive_depth_count);
+                            big_depth.at<uint16_t>(y, x) = std::lround(depth_avg); // FIX (5): no second divide
                         }
                     }
                 }

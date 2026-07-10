@@ -359,7 +359,7 @@ namespace vxs_ros1
         auto start = std::chrono::high_resolution_clock::now();
         while (!vxsdk::vxCheckForData())
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time_ms_));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         auto end = std::chrono::high_resolution_clock::now();
         std::cout <<"waiting time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms\n";
@@ -394,6 +394,8 @@ namespace vxs_ros1
             // Wait until data ready. If publishing rgb, then release the rgb capturing loop
             int N = -1;
             RawSensorFrame frame_data;
+
+            auto start = std::chrono::high_resolution_clock::now();
             std::future<void *> sensor_future = std::async(std::launch::async, &VxsRGBDPublisher::GetNextSensorFrame, this, std::ref(N));
             cv::Mat rgb_img;
             //! Cache the system time that corresponds to the capture time of both RGB (if enabled) and the depth
@@ -402,6 +404,8 @@ namespace vxs_ros1
 
             // Retrieve the opointer to the sensor frame from the SDK
             void *frame_ptr = sensor_future.get();
+            auto finish = std::chrono::high_resolution_clock::now();
+            std::cout << std::chrono::duration_cast<std::chrono::milliseconds>(finish - start).count() << "ms" << std::endl;
 
             frame_data.N = SENSOR_WIDTH * SENSOR_HEIGHT * sizeof(float);
             frame_data.num_entries = SENSOR_WIDTH * SENSOR_HEIGHT;
@@ -530,17 +534,22 @@ namespace vxs_ros1
         cv::waitKey(2);
 
         // Resize, Densify and Align depth image to RGB
+        cv::Matx<float, 3, 3> smallK;
         cv::Mat small_depth = pcl_filters::DownsizeDepthImage( //
             depth.cols / 3,                                    //
             depth.rows / 3,                                    //
             depth,                                             //
-            cams_[0].K);
-
+            cams_[0].K,                                        //
+            smallK);
+        std::cout << "Small depth non-zero entries: " << cv::countNonZero(small_depth) << std::endl;
         depth = pcl_filters::UpsizeDepthImage( //
             rgb_image_size_.width,             //
             rgb_image_size_.height,            //
             small_depth,                       //
-            cams_[0].K);
+            smallK);
+        // cv::Mat big_depth = ScaleDepth(depth);
+        // cv::imshow("big depth", big_depth);
+        // cv::waitKey(2);
 
         cv::Matx<float, 3, 3> newvxK = cams_[0].K;
         const float vxscaler_x = (1.0 * rgb_image_size_.width) / cams_[0].image_size.width;
@@ -550,17 +559,17 @@ namespace vxs_ros1
         newvxK(1, 1) *= vxscaler_y;
         newvxK(1, 2) *= vxscaler_y;
 
-        cv::Mat rect_img1 = pcl_filters::AlignDepthToRGB( //
-            depth,                                        //
-            newvxK,                                       //
-            rgbK_,                                        //
-            rgbR_cs_, rgbt_cs_                            //
+        cv::Mat aligned_depth = pcl_filters::AlignDepthToRGB( //
+            depth,                                            //
+            newvxK,                                           //
+            rgbK_,                                            //
+            rgbR_cs_, rgbt_cs_                                //
         );
 
-        cv::Mat disp_img = ScaleDepth(rect_img1);
-        cv::imshow("depth", disp_img);
+        cv::Mat disp_aligned_depth = ScaleDepth(aligned_depth);
+        cv::imshow("aligned depth", disp_aligned_depth);
         cv::waitKey(2);
-        return rect_img1;
+        return aligned_depth;
     }
 
     void VxsRGBDPublisher::LoadCalibrationFromJson(const std::string &calib_json)
@@ -677,8 +686,6 @@ namespace vxs_ros1
         // publish color image and camera info
         rgb_publisher_->publish(cv_bridge::CvImage(header, "bgr8", rgb_img).toImageMsg());
         cam_info_publisher_->publish(cam_info_msg);
-        cv::imshow("rgb", rgb_img);
-        cv::waitKey(2);
     }
 
     void VxsRGBDPublisher::PublishDepthImage(const cv::Mat &depth_image, const ros::Time &stamp)
