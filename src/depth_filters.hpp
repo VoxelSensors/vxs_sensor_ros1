@@ -72,9 +72,9 @@ namespace vxs_ros1
             const cv::Matx<double, 3, 3> R = cv::Matx<double, 3, 3>(R_cs);
             const cv::Vec<double, 3> t = cv::Vec<double, 3>(t_cs);
 
-            for (size_t r = 0; r < depth.rows; r++)
+            for (int r = 0; r < depth.rows; r++)
             {
-                for (size_t c = 0; c < depth.cols; c++)
+                for (int c = 0; c < depth.cols; c++)
                 {
                     const double x0 = c, y0 = r;
                     cv::Vec<double, 3> M = cv::Vec<double, 3>{(x0 - vxK(0, 2)) / vxK(0, 0), (y0 - vxK(1, 2)) / vxK(1, 1), 1};

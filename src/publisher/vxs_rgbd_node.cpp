@@ -356,10 +356,13 @@ namespace vxs_ros1
     {
         void *frame_ptr = nullptr;
         latest_depth_stamp_ = 0; // reset in order to check later
+        auto start = std::chrono::high_resolution_clock::now();
         while (!vxsdk::vxCheckForData())
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time_ms_));
         }
+        auto end = std::chrono::high_resolution_clock::now();
+        std::cout <<"waiting time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms\n";
         // Get data from the sensor
         long long int stamp;
         float *frameXYZ = vxsdk::vxGetFrameXYZ(stamp);

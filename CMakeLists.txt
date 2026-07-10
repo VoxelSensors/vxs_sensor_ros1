@@ -124,6 +124,33 @@ add_dependencies(vxs_rgbd_node
   ${catkin_EXPORTED_TARGETS}
 )
 
+set(VXS_REL_POSE_CALIB_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/rel_pose_calibrator/RelPoseCalibrator.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/rel_pose_calibrator/RelPoseCalibrator.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/rel_pose_calibrator/vxs_rel_pose_calib_node.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/rel_pose_calibrator/vxs_rel_pose_calib_node.hpp
+)
+
+set(VXS_REL_POSE_CALIB_SOURCES 
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/rel_pose_calibrator/RelPoseCalibrator.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/rel_pose_calibrator/RelPoseCalibrator.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/rel_pose_calibrator/vxs_rel_pose_calib_node.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/rel_pose_calibrator/vxs_rel_pose_calib_node.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/rel_pose_calibrator/vxs_rel_pose_calib_node_main.cpp)
+  
+set(VXS_REL_POSE_CALIB_INCLUDE_DIRS
+${CMAKE_CURRENT_SOURCE_DIR}/src
+${CMAKE_CURRENT_SOURCE_DIR}/rel_pose_calibrator
+${EXT_NODE_INCLUDE_DIRS})
+
+add_executable(vxs_rel_pose_calib ${VXS_REL_POSE_CALIB_SOURCES})
+target_include_directories(vxs_rel_pose_calib PUBLIC ${VXS_REL_POSE_CALIB_INCLUDE_DIRS})
+target_link_libraries(vxs_rel_pose_calib ${OTHER_LIBS})
+add_dependencies(vxs_rel_pose_calib 
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+)
+
 
 # Install python script
 catkin_install_python(PROGRAMS scripts/vxs_py_subscriber.py
