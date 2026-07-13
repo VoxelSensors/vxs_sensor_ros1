@@ -82,6 +82,7 @@ namespace vxs_ros1
             //! Data point output filename
             std::string out_data_filename_;
 
+        public:
             //! Helper to save calibration to CSV
             static void SavePoseCalibrationData( //
                 const std::string &filename,     //
@@ -98,10 +99,17 @@ namespace vxs_ros1
                 RelPoseCalibrator::CalibrationData &data);
 
             //! Helper to load sensor calibration
-            static void LoadSensorCalibrationFromJson( //
+            static bool LoadSensorCalibrationFromJson( //
                 const std::string &calib_json,         //
                 cv::Matx<float, 3, 3> &K,              //
                 cv::Vec<float, 5> &dist_coefs);
+
+            //! Helper to load rgb calibration from yaml (uses cv::fileStorage)
+            static bool LoadRGBCalibration(        //
+                const std::string &rgb_calib_yaml, //
+                const cv::Size_<int> &image_size,  //
+                cv::Matx<float, 3, 3> &K,          //
+                cv::Vec<float, 5> &D);
         };
     } // posecalib
 } // namespace vxs_ros1

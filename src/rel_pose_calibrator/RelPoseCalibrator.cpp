@@ -1,4 +1,4 @@
-#include "RelPoseCalibrator.hpp"
+#include "rel_pose_calibrator/RelPoseCalibrator.hpp"
 
 #include <opencv2/imgproc.hpp>
 #include <opencv2/highgui.hpp>
@@ -262,13 +262,17 @@ namespace vxs_ros1
         }
 
         //! Load sensor calibration
-        void RelPoseCalibrator::LoadSensorCalibrationFromJson( //
+        bool RelPoseCalibrator::LoadSensorCalibrationFromJson( //
             const std::string &calib_json,                     //
             cv::Matx<float, 3, 3> &K,                          //
             cv::Vec<float, 5> &dist)
         {
             // @TODO: Read the config to acquire number of cameras! Assuming stereo for now....
             cv::FileStorage fs(calib_json, 0);
+            if (!fs.isOpened())
+            {
+                return false;
+            }
             cv::FileNode root = fs["Cameras"];
             cv::FileNode cam1 = root[0];
             dist = cv::Vec<float, 5>({cam1["Distortion"][0], cam1["Distortion"][1], cam1["Distortion"][2], cam1["Distortion"][3], cam1["Distortion"][4]});
@@ -298,320 +302,59 @@ namespace vxs_ros1
                                                 cam2["Intrinsic"][2][0], cam2["Intrinsic"][2][1], cam2["Intrinsic"][2][2]});
             cams_[1].image_size = cv::Size_<int>(cam2["SensorSize"]["Width"], cam2["SensorSize"]["Height"]);
             */
+            return true;
         }
 
-        // ==========================================
-        // MAIN
-        // ==========================================
-        int main(int argc, char *argv[])
+        //! Load RGB calibration from **yaml**
+        bool RelPoseCalibrator::LoadRGBCalibration( //
+            const std::string &rgb_calib_yaml,      //
+            const cv::Size_<int> &image_size,       //
+            cv::Matx<float, 3, 3> &K,               //
+            cv::Vec<float, 5> &D)
         {
-            std::string calib_filename = "./new_new_sensor_calib.json";
-            std::string config_filename = "./and2_noMedian_golden_imu_1.json";
+            cv::FileStorage fs(rgb_calib_yaml, cv::FileStorage::READ);
 
-            bool skip = false;
-            if (argc > 1)
+            if (!fs.isOpened())
             {
-                for (int i = 0; i < argc; i++)
-                {
-                    if (i == 0)
-                    {
-                        std::cout << "Argument: " << std::endl;
-                    }
-                    else
-                    {
-                        std::cout << argv[i] << std::endl;
-                    }
-                    if (i == 0 || skip)
-                    {
-                        // does nothing
-                        skip = false;
-                    }
-                    /*
-                    else if (strcmp(argv[i], "--color_intrinsics") == 0)
-                    {
-                        skip = true;
-                        assert(i + 1 < argc);
-                        calibRGBIntraName = argv[i + 1];
-                    }
-                    */
-                    else if (strcmp(argv[i], "--config") == 0)
-                    {
-                        skip = true;
-                        assert(i + 1 < argc);
-                        config_filename = argv[i + 1];
-                    }
-                    else if (strcmp(argv[i], "--sensor_intrinsics") == 0)
-                    {
-                        skip = true;
-                        assert(i + 1 < argc);
-                        calib_filename = argv[i + 1];
-                    }
-                }
+                return false;
             }
 
-            CalibrationData intraData;
+            int rgb_calib_width, rgb_calib_height;
+            fs["width"] >> rgb_calib_width;
+            fs["height"] >> rgb_calib_height;
 
-            const cv::Matx<double, 3, 3> logi4K_K = {//
-                                                     6.6225035001683091e+02, 0., 3.4585341641799397e+02, 0.,
-                                                     6.5844040381453078e+02, 2.2950251102436189e+02, 0., 0., 1.};
-
-            const cv::Vec<double, 5> logi4K_dist_coefs = {2.1370439882736239e-01, -3.9585898806283154e-01,
-                                                          -6.2616916163493411e-03, 9.2965071775274813e-03,
-                                                          -1.4630680298126895e+00};
-
-            cv::Matx<float, 3, 3> sK;
-            cv::Vec<float, 5> sdist;
-            LoadSensorCalibrationFromJson(calib_filename, sK, sdist);
-
-            std::cout << "Sensor Intrinsics: " << sK << std::endl;
-            std::cout << "Sensor dist. coefficients: " << sdist << std::endl;
-
-            // 1. Initialize SDK
-            int FPS = 30;
-            uint32_t streamingDuration = 10;
-
-            //  Detect sensor
-            vxsdk::vxCameraType cam_type = vxsdk::vxDetectCameras();
-            //
-            vxsdk::vxFlag init_flags = vxsdk::vxFlag::XYZT;
-            int nbThreads = 4;
-            int binningAmount = 1;
-
-            vxsdk::vxSetFPS(FPS);
-            vxsdk::vxSetStreamingDuration(streamingDuration);
-            vxsdk::vxSetFilteringParameters(2, 5, 5, 0.2, 0.1, 4, 10);
-
-            int camNum = vxStartSystem(config_filename.c_str(), calib_filename.c_str(), init_flags, cam_type);
-
-            if (camNum < 0)
+            float scaler_x = 1;
+            float scaler_y = 1;
+            if (image_size.width != rgb_calib_width || image_size.height != rgb_calib_height)
             {
-                std::cerr << "Failed to start SDK." << std::endl;
-                return -1;
+                scaler_x = (1.0 * image_size.width) / rgb_calib_width;
+                scaler_y = (1.0 * image_size.height / rgb_calib_height);
             }
 
-            // 2. Initialize RGB Camera (OpenCV)
-            cv::VideoCapture cap(4); // Open default camera
-            if (!cap.isOpened())
+            cv::Matx<float, 1, 5> mxD;
+            fs["D"] >> mxD;
+            for (int i = 0; i < 5; i++)
             {
-                std::cerr << "Failed to open RGB Camera." << std::endl;
-                return -1;
+                D[i] = mxD(0, i);
             }
 
-            cv::Size image_size;
-            image_size.width = cap.get(cv::CAP_PROP_FRAME_WIDTH);
-            image_size.height = cap.get(cv::CAP_PROP_FRAME_HEIGHT);
+            fs["K"] >> K;
+            K(0, 0) *= scaler_x;
+            K(0, 2) *= scaler_x;
+            K(1, 1) *= scaler_y;
+            K(1, 2) *= scaler_y;
 
-            std::cout << "Capture size: " << image_size << std::endl;
+            // fs["P"] >> P;
+            /// P(0, 0) *= scaler_x;
+            // P(0, 2) *= scaler_x;
+            // P(1, 1) *= scaler_y;
+            /// P(1, 2) *= scaler_y;
 
-            // Sensor webcam (logitech 4K Stream Edition). Calibration at max. resolution (1080 x 1920)
-            cv::Size logi4K_max_size(640, 480);
-            const double scaler_x = (image_size.width * 1.0) / logi4K_max_size.width;
-            const double scaler_y = (image_size.height * 1.0) / logi4K_max_size.height;
+            // fs["R"] >> rgbR;
 
-            intraData.K = cv::Mat(                                           //
-                cv::Matx<double, 3, 3>(                                      //
-                    logi4K_K(0, 0) * scaler_x, 0, logi4K_K(0, 2) * scaler_x, //
-                    0, logi4K_K(1, 1) * scaler_y, logi4K_K(1, 2) * scaler_y, //
-                    0, 0, 1));
-            intraData.dist = cv::Mat(logi4K_dist_coefs);
-
-            // Prepare structures
-            cv::Mat rgbFrame, rgbVis;
-            cv::Mat sdkVis;
-
-            std::vector<cv::Point3f> objectPoints; // XYZ from SDK
-            std::vector<cv::Point2f> imagePoints;  // XY from RGB
-            std::vector<cv::Point2f> sdk2DPoints;  // XY from SDK (for CSV record)
-
-            CalibrationData calibData;
-
-            // For Mode 2, pre-load data
-            if (CURRENT_MODE == 2)
-            {
-                if (!loadCalibrationData(CALIB_FILE, calibData))
-                {
-                    std::cout << "Calibration file missing, cannot run Mode 2." << std::endl;
-                    return -1;
-                }
-                std::cout << "Mode 2: Calibration loaded." << std::endl;
-            }
-            else
-            {
-                std::cout << "Mode 1: Collect data (Spacebar) -> Calibrate & Save (C)." << std::endl;
-            }
-
-            int iter = 0;
-
-            // 3. Infinite Loop
-            while (true)
-            {
-                // Grab RGB Frame
-                cap >> rgbFrame;
-                if (rgbFrame.empty())
-                    continue;
-
-                // SDK Data Check
-                while (vxsdk::vxCheckForData())
-                {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                }
-                // Get Data Pointers
-
-                // NOTE: vxGetXYXYT/XYZT signatures depend on specific SDK version.
-                // Assuming getting pointer and count logic based on provided context.
-                // Usually SDK returns a pointer, we need to know how many points (often fixed or returned).
-                // Based on previous code, looks like `nbPoints` needs to be fetched or is implicit.
-                // Assuming we fetch a fixed buffer or SDK manages size internally, but usually we need a count.
-                // Let's assume vxCheckForData ensures current buffer is valid.
-                // We use a safe arbitrary number if not returned, or assume SDK provides 'nbPoints' reference.
-                // *Correction based on snippet*: `vxGetXYXYT(nbPoints)` takes nbPoints as arg?
-                // In snippet: `vxsdk::vxXYXYT* xyt0 = vxsdk::vxGetXYT(nbPoints, 0);` -> nbPoints is passed by reference likely?
-                // Let's assume the previous code pattern:
-
-                // Re-fetching nbPoints logic from SDK based on pipeline type 'all'
-                // This part depends heavily on SDK impl, assuming vxGetXYZT returns count or updates ref.
-                // Let's assume we call a function that populates nbPoints or we use a fixed size logic from prior code.
-                // In the snippet, `vxsdk::vxGetXYXYT(nbPoints)` passes nbPoints.
-
-                // IMPORTANT: In the provided snippet, nbPoints was initialized to 0 inside the `else` block.
-                // SDK functions likely update it.
-
-                int num_points = 0;
-                vxsdk::vxXYZT *xyztData = vxsdk::vxGetXYZT(num_points);
-                // std::cout << " XYZT nbPoints: " << num_points << std::endl;
-                std::vector<vxsdk::vxXYZT> points3d;
-                points3d.reserve(num_points);
-                std::vector<vxsdk::vxXYT> img_points;
-                img_points.reserve(num_points);
-                for (int i = 0; i < num_points; i++)
-                {
-                    points3d.emplace_back(xyztData[i]);
-                    const float X = xyztData[i].x;
-                    const float Y = xyztData[i].y;
-                    const float Z = xyztData[i].z;
-                    if (Z < 1e-3)
-                        continue;
-                    // Project on image
-                    const int x = std::lround(sK(0, 0) * X / Z + sK(0, 2));
-                    const int y = std::lround(sK(1, 1) * Y / Z + sK(1, 2));
-                    if (x < 0 || x > 299 || y < 0 || y > 299)
-                        continue;
-                    vxsdk::vxXYT xyt;
-                    xyt.x = x;
-                    xyt.y = y;
-                    xyt.timestamp = xyztData[i].timestamp;
-                    img_points.emplace_back(xyt);
-                }
-                // std::cout << " XYT nbPoints: " << img_points.size() << std::endl;
-
-                // --- DATA PROCESSING ---
-
-                cv::Point2f rgbCenter(0, 0);
-                bool rgbFound = findRGBTarget(rgbFrame, rgbCenter, rgbVis);
-
-                cv::Point2f sdkMean2D(0, 0);
-                processXYT(img_points, sdkMean2D, sdkVis);
-
-                cv::Point3f sdkMean3D(0, 0, 0);
-                bool sdk3DFound = processXYZT(points3d, sdkMean3D);
-
-                // --- MODE 1: DATA COLLECTION ---
-                if (CURRENT_MODE == 1)
-                {
-                    // Visualization
-                    cv::imshow("RGB Source", rgbVis);
-                    cv::imshow("SDK Event Accumulation", sdkVis);
-
-                    int key = cv::waitKey(1);
-
-                    // Spacebar: Record
-                    if (key == 32)
-                    {
-                        if (rgbFound && sdk3DFound)
-                        {
-                            objectPoints.push_back(sdkMean3D);
-                            imagePoints.push_back(rgbCenter);
-                            sdk2DPoints.push_back(sdkMean2D);
-
-                            std::cout << "Recorded: RGB(" << rgbCenter.x << "," << rgbCenter.y << ") "
-                                      << "SDK3D(" << sdkMean3D.x << "," << sdkMean3D.y << "," << sdkMean3D.z << ")" << std::endl;
-                        }
-                        else
-                        {
-                            std::cout << "Skipped: Targets not found in both cameras." << std::endl;
-                        }
-                    }
-
-                    // 'c': Compute and Save
-                    if (key == 'c' || key == 'C')
-                    {
-                        if (objectPoints.size() < 4)
-                        {
-                            std::cout << "Need at least 4 points to calibrate." << std::endl;
-                        }
-                        else
-                        {
-                            // Save Raw Points CSV
-                            std::ofstream outFile(DATA_FILE);
-                            outFile << "rgb_x,rgb_y,sdk_mean_x,sdk_mean_y,sdk_z_x,sdk_z_y,sdk_z_z\n";
-                            for (size_t i = 0; i < objectPoints.size(); ++i)
-                            {
-                                outFile << imagePoints[i].x << "," << imagePoints[i].y << ","
-                                        << sdk2DPoints[i].x << "," << sdk2DPoints[i].y << ","
-                                        << objectPoints[i].x << "," << objectPoints[i].y << "," << objectPoints[i].z << "\n";
-                            }
-                            outFile.close();
-                            std::cout << "Points saved to " << DATA_FILE << std::endl;
-
-                            // Calibrate (SolvePnP)
-                            // Heuristic Camera Matrix (Assumes generic webcam if not calibrated)
-                            // fx, fy ~ width, cx, cy ~ center
-                            double w = rgbFrame.cols;
-                            double h = rgbFrame.rows;
-
-                            cv::Mat rvec, tvec;
-
-                            std::cout << "Calibration before: " << intraData.K << std::endl;
-
-                            cv::solvePnP(objectPoints, imagePoints, intraData.K, intraData.dist, rvec, tvec, false, cv::SOLVEPNP_SQPNP);
-                            std::cout << "Calibration after: " << intraData.K << std::endl;
-
-                            SaveCalibrationData(CALIB_FILE, rvec, tvec, intraData.K, intraData.dist);
-
-                            std::cout << "Exiting..." << std::endl;
-                            break;
-                        }
-                    }
-                }
-                // --- MODE 2: VERIFICATION ---
-                else if (CURRENT_MODE == 2)
-                {
-                    // Project 3D Point to RGB
-                    if (sdk3DFound)
-                    {
-                        std::vector<cv::Point3f> pts3d;
-                        pts3d.push_back(sdkMean3D);
-                        std::vector<cv::Point2f> projectedPts;
-
-                        cv::projectPoints(pts3d, calibData.rvec, calibData.tvec, calibData.K, calibData.dist, projectedPts);
-
-                        // Draw Red Cross at projected location
-                        if (projectedPts.size() > 0)
-                        {
-                            cv::drawMarker(rgbVis, projectedPts[0], cv::Scalar(0, 0, 255), cv::MARKER_CROSS, 25, 3);
-                        }
-                    }
-
-                    cv::imshow("RGB Verification (Red=Projected, Green=Blob)", rgbVis);
-                    cv::imshow("SDK Event Accumulation", sdkVis);
-                    if (cv::waitKey(1) == 27)
-                        break; // ESC to exit
-                }
-            }
-
-            vxsdk::vxStopSystem();
-            return 0;
+            fs.release();
+            return true;
         }
 
-    } // [psecalib]
+    } // namespace posecalib
 } // namespace vxs_ros1
