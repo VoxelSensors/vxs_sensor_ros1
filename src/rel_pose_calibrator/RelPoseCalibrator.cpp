@@ -7,18 +7,53 @@ namespace vxs_ros1
 {
     namespace posecalib
     {
-        const std::string RelPoseCalibrator::DEFAULT_CALIB_FILE = "rgb_calibration.csv";
+        const std::string RelPoseCalibrator::DEFAULT_CALIB_FILE = "pose_calibration.csv";
         const std::string RelPoseCalibrator::DEFAULT_DATA_FILE = "collected_points.csv";
 
         RelPoseCalibrator::RelPoseCalibrator(                                                //
-            const std::string &cam_calib_yaml,                                               //
-            const std::string &sensor_config_json,                                           //
-            const std::string &out_calib_filename,                                           //
-            const std::string &out_data_filename) : cam_calib_yaml_(cam_calib_yaml),         //
-                                                    sensor_config_json_(sensor_config_json), //
+            const cv::Size_<int> &rgb_size,                                                  //
+            const std::string &rgb_calib_yaml,                                               //
+            const std::string &sensor_calib_json,                                            //
+            const bool calib_mode,                                                           //
+            const std::string &out_calib_filename,                                           //                                           //
+            const std::string &out_data_filename) : rgb_size_(rgb_size),                     //
+                                                    rgb_calib_filename_(rgb_calib_yaml),     //
+                                                    sensor_calib_json_(sensor_calib_json),   //
                                                     out_calib_filename_(out_calib_filename), //
-                                                    out_data_filename_(out_data_filename)
+                                                    out_data_filename_(out_data_filename),   //
+                                                    calib_mode_(calib_mode)
         {
+            // A. Load sensor calibration (for projection of 3D points ont6o the image plane)
+            bool result = LoadSensorCalibrationFromJson( //
+                sensor_calib_json_,                      //
+                sensor_calib_.K,                         //
+                sensor_calib_.dist);
+            if (!result)
+            {
+                std::cerr << "Could not load sensor calibration '" << sensor_calib_json_ << "'! Exiting...\n";
+                exit(-1);
+            }
+            std::cout << "Sensor Intrinsics: " << sensor_calib_.K << std::endl;
+            std::cout << "Sensor dist. coefficients: " << sensor_calib_.dist << std::endl;
+
+            //
+            // B. Load camera calibration
+            result = posecalib::RelPoseCalibrator::LoadRGBCalibration( //
+                rgb_calib_filename_,                                   //
+                rgb_size_,                                             //
+                rgb_calib_.K,                                          //
+                rgb_calib_.dist);
+
+            // C. Load relative pose calibration if in validation mode (calib_mode_ = false)
+            // If in validation mode, load the relative pose calibration
+            if (ValidationMode())
+            {
+                if (!LoadPoseCalibrationData(out_calib_filename, rel_pose_))
+                {
+                    std::cerr << "Calibration file missing, cannot run validation." << std::endl;
+                    exit(-1);
+                }
+            }
         }
 
         void RelPoseCalibrator::SavePoseCalibrationData( //

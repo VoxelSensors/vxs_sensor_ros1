@@ -3,6 +3,8 @@
  * RelPoseCalibrator.hpp
  *
  * George Terzakis, VoxelSensors, July 2026
+ *
+ * Adapted from code by Laurie Van Bogaert
  */
 
 #ifndef RELAPOSECALIB_HPP_
@@ -51,8 +53,10 @@ namespace vxs_ros1
 
             //! Constructor
             RelPoseCalibrator(                                              //
-                const std::string &cam_calib_yaml,                          //
-                const std::string &sensor_config_json,                      //
+                const cv::Size_<int> &rgb_size,                             //
+                const std::string &rgb_calib_filename,                      //
+                const std::string &sensor_calib_json,                       //
+                const bool calib_mode,                                      //
                 const std::string &out_calib_filename = DEFAULT_CALIB_FILE, //
                 const std::string &out_data_filename = DEFAULT_DATA_FILE);
 
@@ -72,15 +76,43 @@ namespace vxs_ros1
                 const std::vector<vxsdk::vxXYZT> &data, //
                 cv::Point3f &mean_pt);
 
+            //! Get rgb size
+            inline cv::Size_<int> GetRgbSize() const { return rgb_size_; }
+            //! Get rgb calibration
+            inline CalibrationData GetRgbCalibration() const { return rgb_calib_; }
+            //! Get sensor calibration
+            inline CalibrationData GetSensorCalibration() const { return sensor_calib_; }
+            //! Get (relative) pose calibration
+            inline CalibrationData GetPoseCalibration() const { return rel_pose_; }
+            //! In validation mode?
+            inline bool ValidationMode() const { return !calib_mode_; }
+            //! Get the points /data filename
+            inline std::string GetDataFilename() const { return out_data_filename_; }
+            //! Get calibration filename
+            inline std::string GetPoseCalibrationFilename() const { return out_calib_filename_; }
+
+            //! Camera calibration
+            CalibrationData rgb_calib_;
+
         private:
+            // RGB size
+            cv::Size_<int> rgb_size_;
             //! Camera calibration yaml filename
-            std::string cam_calib_yaml_;
-            //! Sensor config json filename
-            std::string sensor_config_json_;
+            std::string rgb_calib_filename_;
+            //! Sensor calibration json filename
+            std::string sensor_calib_json_;
             //! Calibration (csv) output filename
             std::string out_calib_filename_;
             //! Data point output filename
             std::string out_data_filename_;
+
+            //! Sensor calibration
+            CalibrationData sensor_calib_;
+            //! Relative pose calibration (wither loaded or estimated)
+            CalibrationData rel_pose_;
+
+            //! Calibration mode (true). If false, cerification (diplay) mode.
+            bool calib_mode_;
 
         public:
             //! Helper to save calibration to CSV
