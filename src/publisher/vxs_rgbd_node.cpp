@@ -232,6 +232,8 @@ namespace vxs_ros1
             ros::shutdown();
             return;
         }
+        //@TODO: Set this from ros arguments
+        vxsdk::vxSetObservationWindow(on_time_, period_time_);
 
         // Create publishers
         rgb_publisher_ = std::make_shared<ros::Publisher>(nh_.advertise<sensor_msgs::Image>(color_topic_, 10));
@@ -305,7 +307,8 @@ namespace vxs_ros1
 
         // Set the frame rate (or time window)
         vxsdk::vxFlag init_flags;
-        init_flags = vxsdk::vxFlag::FBPOINTCLOUD;
+        // init_flags = vxsdk::vxFlag::FBPOINTCLOUD;
+        init_flags = vxsdk::vxFlag::FBDEPTH;
         vxsdk::vxSetFPS(fps_);
         if (publish_imu_)
         {
@@ -352,24 +355,24 @@ namespace vxs_ros1
         return cam_num > 0;
     }
 
-    void *VxsRGBDPublisher::GetNextSensorFrame(int &N)
+    void *VxsRGBDPublisher::GetNextSensorFrame()
     {
         void *frame_ptr = nullptr;
         latest_depth_stamp_ = 0; // reset in order to check later
         auto start = std::chrono::high_resolution_clock::now();
         while (!vxsdk::vxCheckForData())
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         auto end = std::chrono::high_resolution_clock::now();
-        std::cout <<"waiting time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms\n";
+        std::cout << "waiting time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms\n";
         // Get data from the sensor
         long long int stamp;
-        float *frameXYZ = vxsdk::vxGetFrameXYZ(stamp);
-        if (!frameXYZ)
+        float *framexyD = vxsdk::vxGetDepthFrame(stamp);
+        if (!framexyD)
             std::cerr << "NULL XYZ!\n";
 
-        frame_ptr = stamp == 0 ? nullptr : (void *)frameXYZ;
+        frame_ptr = stamp == 0 ? nullptr : (void *)framexyD;
         if (frame_ptr)
             latest_depth_stamp_ = stamp * PERIOD_75_MHZ;
 
@@ -396,7 +399,8 @@ namespace vxs_ros1
             RawSensorFrame frame_data;
 
             auto start = std::chrono::high_resolution_clock::now();
-            std::future<void *> sensor_future = std::async(std::launch::async, &VxsRGBDPublisher::GetNextSensorFrame, this, std::ref(N));
+            // std::future<void *> sensor_future = std::async(std::launch::async, &VxsRGBDPublisher::GetNextSensorFrame, this, std::ref(N));
+            std::future<void *> sensor_future = std::async(std::launch::async, &VxsRGBDPublisher::GetNextSensorFrame, this);
             cv::Mat rgb_img;
             //! Cache the system time that corresponds to the capture time of both RGB (if enabled) and the depth
             frame_data.stamp = ros::Time::now();
@@ -407,9 +411,9 @@ namespace vxs_ros1
             auto finish = std::chrono::high_resolution_clock::now();
             std::cout << std::chrono::duration_cast<std::chrono::milliseconds>(finish - start).count() << "ms" << std::endl;
 
-            frame_data.N = SENSOR_WIDTH * SENSOR_HEIGHT * sizeof(float);
+            frame_data.N = SENSOR_WIDTH * SENSOR_HEIGHT * sizeof(float); // Should be a depth image
             frame_data.num_entries = SENSOR_WIDTH * SENSOR_HEIGHT;
-            frame_data.frame_type = TSensorFrame::FrameXYZ;
+            frame_data.frame_type = TSensorFrame::DepthFrame;
 
             // if (frame_ptr)
             //{
@@ -429,9 +433,9 @@ namespace vxs_ros1
             std::unique_lock<std::mutex> lock(frame_queue_mutex_);
             if (frame_queue_.size() >= MAX_QUEUE_DEPTH)
             {
-                frame_queue_.pop();
+                frame_queue_.pop_front();
             }
-            frame_queue_.push(frame_data);
+            frame_queue_.push_back(frame_data);
             frame_queue_cv_.notify_one();
             //}
 
@@ -488,6 +492,62 @@ namespace vxs_ros1
                 flag_update_observation_window_ = false;
             }
         }
+    }
+
+    cv::Mat VxsRGBDPublisher::UnpackDepthFrameData(float *depth_frame)
+    {
+        cv::Mat depth(SENSOR_HEIGHT, SENSOR_WIDTH, CV_16U);
+        float *depth_ptr = depth_frame;
+        for (size_t r = 0; r < SENSOR_HEIGHT; r++)
+        {
+            for (size_t c = 0; c < SENSOR_WIDTH; c++)
+            {
+                const uint16_t d = std::lround(*(depth_frame++));
+                depth.at<uint16_t>(r, c) = d;
+            }
+        }
+        cv::Mat disp_img1 = ScaleDepth(depth);
+        cv::imshow("org. depth", disp_img1);
+        cv::waitKey(2);
+
+        // Resize, Densify and Align depth image to RGB
+        cv::Matx<float, 3, 3> smallK;
+        cv::Mat small_depth = pcl_filters::DownsizeDepthImage( //
+            depth.cols / 3,                                    //
+            depth.rows / 3,                                    //
+            depth,                                             //
+            cams_[0].K,                                        //
+            smallK);
+        std::cout << "Small depth non-zero entries: " << cv::countNonZero(small_depth) << std::endl;
+        depth = pcl_filters::UpsizeDepthImage( //
+            rgb_image_size_.width,             //
+            rgb_image_size_.height,            //
+            small_depth,                       //
+            smallK);
+        // cv::Mat big_depth = ScaleDepth(depth);
+        // cv::imshow("big depth", big_depth);
+        // cv::waitKey(2);
+
+        cv::Matx<float, 3, 3> newvxK = cams_[0].K;
+        const float vxscaler_x = (1.0 * rgb_image_size_.width) / cams_[0].image_size.width;
+        const float vxscaler_y = (1.0 * rgb_image_size_.height) / cams_[0].image_size.height;
+        newvxK(0, 0) *= vxscaler_x;
+        newvxK(0, 2) *= vxscaler_x;
+        newvxK(1, 1) *= vxscaler_y;
+        newvxK(1, 2) *= vxscaler_y;
+
+        cv::Mat aligned_depth = pcl_filters::AlignDepthToRGB( //
+            depth,                                            //
+            newvxK,                                           //
+            rgbK_,                                            //
+            rgbR_cs_, rgbt_cs_                                //
+        );
+
+        cv::Mat disp_aligned_depth = ScaleDepth(aligned_depth);
+        cv::imshow("aligned depth", disp_aligned_depth);
+        cv::waitKey(2);
+        cv::imwrite("aligned_depth.jpg", aligned_depth);
+        return aligned_depth;
     }
 
     cv::Mat VxsRGBDPublisher::UnpackFrameSensorData(float *frameXYZ, std::vector<cv::Vec3f> &points)
@@ -615,14 +675,17 @@ namespace vxs_ros1
                     continue;
 
                 frame_data = frame_queue_.front();
-                frame_queue_.pop();
+                frame_queue_.pop_front();
 
                 // Get data from the sensor
-                float *frameXYZ = (float *)&(*frame_data.data)[0];
+                float *raw_frame = (float *)&(*frame_data.data)[0];
+
                 // Extract frame
                 std::vector<cv::Vec3f> points;
 
-                cv::Mat frame = UnpackFrameSensorData(frameXYZ, points);
+                // cv::Mat frame = UnpackFrameSensorData(frameXYZ, points);
+                cv::Mat frame = UnpackDepthFrameData(raw_frame);
+
                 // Publish sensor data as a depth image
                 PublishDepthImage(frame, frame_data.stamp);
             }

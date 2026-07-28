@@ -45,7 +45,8 @@ namespace vxs_ros1
     enum class TSensorFrame
     {
         EventsXYZT = 0,
-        FrameXYZ
+        FrameXYZ,
+        DepthFrame
     };
 
     struct RGBFrame
@@ -73,10 +74,10 @@ namespace vxs_ros1
     struct FilteringParams
     {
         static constexpr int DEFAULT_BINNING = 0;
-        static const float DEFAULT_PREFILTERING_THRESH;        // = 2.0;
-        static constexpr int DEFAULT_POSTFILTERING_THRESH = 5; //
+        static const float DEFAULT_PREFILTERING_THRESH;         // = 2.0;
+        static constexpr int DEFAULT_POSTFILTERING_THRESH = 40; //
 
-        static const float DEFAULT_FILTERP1X; // = 0.1;
+        static const float DEFAULT_FILTERP1X; // = 0.2;
         static const float DEFAULT_FILTERP1Y; // = 0.1;
         static constexpr int DEFAULT_TEMPORAL_THRESH = 4;
         static constexpr int DEFAULT_SPATIAL_THRESH = 10;
@@ -185,11 +186,11 @@ namespace vxs_ros1
         //! A flag forcing update of the observation window with the cached values
         std::atomic<bool> flag_update_observation_window_;
         //! observation window parameters
-        int on_time_, period_time_;
+        int on_time_ = 20, period_time_ = 60;
         //! Mainloop sleep time
         int sleep_time_ms_;
 
-        std::queue<RawSensorFrame> frame_queue_;
+        std::list<RawSensorFrame> frame_queue_;
         std::mutex frame_queue_mutex_;
         std::condition_variable frame_queue_cv_;
 
@@ -223,7 +224,7 @@ namespace vxs_ros1
         //! Initializae sensor
         bool InitSensor();
         //! Return pointer to next sensor frame
-        void *GetNextSensorFrame(int &N);
+        void *GetNextSensorFrame();
         //! Return next captured RGB frame
         cv::Mat GetNextRGBFrame();
 
@@ -236,6 +237,8 @@ namespace vxs_ros1
 
         //! Unpack sensor data into a cv::Mat and return 3D points
         cv::Mat UnpackFrameSensorData(float *frameXYZ, std::vector<cv::Vec3f> &points);
+        //! Unpack sensor data in the form of a depth frame
+        cv::Mat UnpackDepthFrameData(float *depth_frame);
 
         //! Load calilbration from json (required for the formation of the depth map)
         void LoadCalibrationFromJson(const std::string &calib_json);
