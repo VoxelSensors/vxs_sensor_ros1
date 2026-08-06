@@ -17,7 +17,7 @@ namespace vxs_ros1
         nhp.param<std::string>("rgb_calib_filename", rgb_calib_filename, "");
         ROS_INFO_STREAM("RGB calibration filename: " << rgb_calib_filename);
         nhp.param<std::string>("sensor_calib_json", sensor_calib_json_, "");
-        ROS_INFO_STREAM("RGB calibration json: " << sensor_calib_json_);
+        ROS_INFO_STREAM("Sensor calibration json: " << sensor_calib_json_);
         nhp.param<std::string>("sensor_config_json", sensor_config_json_, "");
         ROS_INFO_STREAM("SDK config json: " << sensor_config_json_);
         std::string rel_pose_filename;

@@ -15,6 +15,21 @@
 
 namespace
 {
+    cv::Mat FilterRedChannel(const cv::Mat &rgb_image)
+    {
+        const int rows = rgb_image.rows;
+        const int cols = rgb_image.cols;
+
+        std::vector<cv::Mat> channels;
+        // channels.resize(3);
+        cv::split(rgb_image, channels);
+        channels[2] = cv::Mat(rows, cols, CV_8UC1);
+
+        cv::Mat dst;
+        cv::merge(channels, dst);
+        return dst;
+    }
+
     cv::Mat ScaleDepth(const cv::Mat &depth)
     {
         cv::Mat gray = cv::Mat(depth.size(), CV_8U);
@@ -475,7 +490,7 @@ namespace vxs_ros1
             {
                 RGBFrame rgb_data;
                 rgb_data.stamp = frame_data.stamp; // = ros_ref_time_
-                rgb_data.img = rgb_img;
+                rgb_data.img = FilterRedChannel(rgb_img);
                 std::unique_lock<std::mutex> lock(rgb_queue_mutex_);
                 if (rgb_queue_.size() >= MAX_QUEUE_DEPTH)
                 {
