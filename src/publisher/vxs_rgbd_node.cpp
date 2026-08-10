@@ -15,6 +15,64 @@
 
 namespace
 {
+    cv::Mat InpaintRangeOfRedChannel( //
+        const cv::Mat &rgb_image,     //
+        const int lrange_low = 0,     //
+        const int lrange_up = 10,     //
+        const int urange_low = 140,   //
+        const int urange_up = 180)
+    {
+        // 1. Convert the image to HSV color space
+        cv::Mat hsv_image;
+        cv::cvtColor(rgb_image, hsv_image, cv::COLOR_BGR2HSV);
+
+        // 2. Define the two ranges for Red Hue
+        // Lower red range (0 to 10)
+        cv::Mat mask1;
+        cv::inRange(hsv_image, cv::Scalar(lrange_low, 50, 50), cv::Scalar(lrange_up, 255, 255), mask1);
+
+        // Upper red range
+        cv::Mat mask2;
+        cv::inRange(hsv_image, cv::Scalar(urange_low, 50, 50), cv::Scalar(urange_up, 255, 255), mask2);
+
+        // 3. Combine both masks to capture all red tones
+        cv::Mat combined_mask = mask1 | mask2;
+
+        // 4. Dilate the mask to ensure soft/fading red edges are fully included
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+        cv::Mat refined_mask;
+        cv::dilate(combined_mask, refined_mask, kernel, cv::Point(-1, -1), 1);
+
+        // 5. Inpaint the original image using the range-based mask
+        cv::Mat output_image;
+        cv::inpaint(rgb_image, refined_mask, output_image, 5.0, cv::INPAINT_TELEA);
+        return output_image;
+    }
+
+    cv::Mat InpaintRedChannel(const cv::Mat &rgb_image)
+    {
+        // 1. Extract the Red channel (Index 2 in BGR)
+        // Extracting a single channel using cv::extractChannel is memory-efficient
+        cv::Mat red_channel;
+        cv::extractChannel(rgb_image, red_channel, 2);
+
+        // 2. Create a binary mask by thresholding the red channel
+        // Adjust '200' based on the brightness of your target red damage pixels
+        cv::Mat mask;
+        cv::threshold(red_channel, mask, 200, 255, cv::THRESH_BINARY);
+
+        // 3. Clean up the mask (Dilate slightly to cover soft edges of the damage)
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+        cv::Mat refined_mask;
+        cv::dilate(mask, refined_mask, kernel, cv::Point(-1, -1), 1);
+
+        // 4. Inpaint the entire color image using the red-derived mask
+        cv::Mat output_image;
+        cv::inpaint(rgb_image, refined_mask, output_image, 5.0, cv::INPAINT_TELEA);
+
+        return output_image;
+    }
+
     cv::Mat FilterRedChannel(const cv::Mat &rgb_image)
     {
         const int rows = rgb_image.rows;
@@ -440,10 +498,10 @@ namespace vxs_ros1
                 flag_ref_time_initialized_ = true;
             }
             // Copy into the frame queue and release the publishing thread
-            frame_data.data = std::make_shared<std::vector<uint8_t>>();
-            frame_data.data->resize(frame_data.N);
+            frame_data.data = std::vector<uint8_t>();
+            frame_data.data.resize(frame_data.N);
 
-            std::memcpy((void *)&(*frame_data.data)[0], frame_ptr, frame_data.N);
+            std::memcpy((void *)&(frame_data.data[0]), frame_ptr, frame_data.N);
 
             std::unique_lock<std::mutex> lock(frame_queue_mutex_);
             if (frame_queue_.size() >= MAX_QUEUE_DEPTH)
@@ -490,7 +548,9 @@ namespace vxs_ros1
             {
                 RGBFrame rgb_data;
                 rgb_data.stamp = frame_data.stamp; // = ros_ref_time_
-                rgb_data.img = FilterRedChannel(rgb_img);
+                                                   // rgb_data.img = FilterRedChannel(rgb_img);
+                // rgb_data.img = InpaintRedChannel(rgb_img);
+                rgb_data.img = InpaintRangeOfRedChannel(rgb_img);
                 std::unique_lock<std::mutex> lock(rgb_queue_mutex_);
                 if (rgb_queue_.size() >= MAX_QUEUE_DEPTH)
                 {
@@ -524,7 +584,8 @@ namespace vxs_ros1
         cv::Mat disp_img1 = ScaleDepth(depth);
         cv::imshow("org. depth", disp_img1);
         cv::waitKey(2);
-
+        // Write image for debugging in matlab...
+        cv::imwrite("depth_img.png", depth);
         // Resize, Densify and Align depth image to RGB
         cv::Matx<float, 3, 3> smallK;
         cv::Mat small_depth = pcl_filters::DownsizeDepthImage( //
@@ -693,7 +754,7 @@ namespace vxs_ros1
                 frame_queue_.pop_front();
 
                 // Get data from the sensor
-                float *raw_frame = (float *)&(*frame_data.data)[0];
+                float *raw_frame = (float *)&(frame_data.data[0]);
 
                 // Extract frame
                 std::vector<cv::Vec3f> points;

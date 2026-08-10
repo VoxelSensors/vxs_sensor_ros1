@@ -62,8 +62,8 @@ namespace vxs_ros1
         int num_entries;
         //! Sensor frame type (events XYZT/frame XYZ)
         TSensorFrame frame_type;
-        //! The frame data as a strteam of bytes
-        std::shared_ptr<std::vector<uint8_t>> data;
+        //! The frame data as a stream of bytes
+        std::vector<uint8_t> data;
         //! The global (ROS) stamp
         ros::Time stamp;
     };
